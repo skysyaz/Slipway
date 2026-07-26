@@ -1,0 +1,66 @@
+# Version control
+.git
+.gitignore
+.gitattributes
+
+# Dependencies (will be installed fresh in the build stage)
+node_modules
+
+# Next.js build output (will be rebuilt)
+.next
+out
+build
+
+# Logs
+*.log
+dev.log
+server.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage directories
+coverage
+*.lcov
+.nyc_output
+
+# IDE / editor
+.vscode
+.idea
+*.swp
+*.swo
+.DS_Store
+
+# Environment files (the container reads env vars at runtime)
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+
+# Tests
+tests
+__tests__
+*.test.ts
+*.test.tsx
+*.spec.ts
+*.spec.tsx
+
+# Docs / examples / scripts not needed at runtime
+docs
+examples
+scripts
+download
+worklog.md
+README.md
+LICENSE
+
+# Slipway internals
+.zscripts
+agent-ctx

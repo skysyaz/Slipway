@@ -18,7 +18,9 @@ import { BackupsView } from '@/components/slipway/views/backups'
 import { PreviewsView } from '@/components/slipway/views/previews'
 import { SettingsView } from '@/components/slipway/views/settings'
 import { CliDesktopView } from '@/components/slipway/views/cli-desktop'
+import { LoginView } from '@/components/slipway/views/login'
 import { useSlipway } from '@/lib/slipway/store'
+import { useAuth } from '@/components/slipway/auth-provider'
 import { CommandPalette } from '@/components/slipway/command-palette'
 import { MobileNav } from '@/components/slipway/mobile-nav'
 import { SlipwayMark } from '@/components/slipway/icons'
@@ -82,6 +84,7 @@ function LoadingShell() {
 }
 
 export default function Home() {
+  const { user, loading } = useAuth()
   // Avoid hydration mismatches: the seed data uses Math.random / Date.now,
   // so we render a static shell on the server and swap in the live UI after mount.
   const [mounted, setMounted] = React.useState(false)
@@ -89,6 +92,7 @@ export default function Home() {
     setMounted(true)
   }, [])
 
-  if (!mounted) return <LoadingShell />
+  if (!mounted || loading) return <LoadingShell />
+  if (!user) return <LoginView />
   return <AppShell />
 }

@@ -16,10 +16,14 @@ import {
   Info,
   XCircle,
   CircleDot,
+  Settings,
+  KeyRound,
+  LogOut,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useSlipway } from '@/lib/slipway/store'
 import { useTheme } from './theme-provider'
+import { useAuth } from './auth-provider'
 import { Kbd, TimeAgo } from './format'
 import { cn } from '@/lib/utils'
 import type { Environment } from '@/lib/slipway/types'
@@ -101,11 +105,79 @@ export function Topbar() {
         </Button>
 
         {/* User menu */}
-        <button className="h-9 w-9 rounded-full bg-gradient-to-br from-emerald-400 to-emerald-600 text-emerald-950 font-semibold text-xs flex items-center justify-center shrink-0 hover:ring-2 hover:ring-primary/30 transition-all">
-          MK
-        </button>
+        <UserMenu />
       </div>
     </header>
+  )
+}
+
+function UserMenu() {
+  const { user, logout } = useAuth()
+  const [open, setOpen] = React.useState(false)
+  const setView = useSlipway((s) => s.setView)
+  // initial for the avatar — admin → "AD"
+  const initials = (user?.username ?? 'admin').slice(0, 2).toUpperCase()
+
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen(!open)}
+        className="h-9 w-9 rounded-full bg-gradient-to-br from-emerald-400 to-emerald-600 text-emerald-950 font-semibold text-xs flex items-center justify-center shrink-0 hover:ring-2 hover:ring-primary/30 transition-all"
+        aria-label="Account menu"
+      >
+        {initials}
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-30" onClick={() => setOpen(false)} />
+          <div className="absolute right-0 top-full mt-1.5 w-64 rounded-lg border border-border bg-popover shadow-xl z-40 p-1.5">
+            <div className="px-2.5 py-2 border-b border-border mb-1">
+              <div className="flex items-center gap-2.5">
+                <div className="h-9 w-9 rounded-full bg-gradient-to-br from-emerald-400 to-emerald-600 text-emerald-950 font-semibold text-xs flex items-center justify-center shrink-0">
+                  {initials}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-[13px] font-medium truncate">{user?.username ?? 'admin'}</div>
+                  <div className="text-[11px] text-muted-foreground">admin · cluster: helix-eu</div>
+                </div>
+              </div>
+            </div>
+            <button
+              onClick={() => {
+                setView('settings')
+                setOpen(false)
+              }}
+              className="w-full flex items-center gap-2.5 px-2.5 h-8 rounded-md text-[13px] hover:bg-accent transition-colors"
+            >
+              <Settings size={13} className="text-muted-foreground" />
+              Account settings
+            </button>
+            <button
+              onClick={() => {
+                setView('settings')
+                setOpen(false)
+              }}
+              className="w-full flex items-center gap-2.5 px-2.5 h-8 rounded-md text-[13px] hover:bg-accent transition-colors"
+            >
+              <KeyRound size={13} className="text-muted-foreground" />
+              API tokens
+            </button>
+            <div className="border-t border-border mt-1 pt-1">
+              <button
+                onClick={() => {
+                  logout()
+                  setOpen(false)
+                }}
+                className="w-full flex items-center gap-2.5 px-2.5 h-8 rounded-md text-[13px] hover:bg-accent transition-colors text-rose-500"
+              >
+                <LogOut size={13} />
+                Sign out
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
   )
 }
 

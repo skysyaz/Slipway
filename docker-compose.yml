@@ -1,0 +1,60 @@
+# Slipway — self-hosted deployment platform
+# Production-ready docker-compose template.
+#
+# Quick start:
+#   1. cp .env.example .env  &&  edit SLIPWAY_ADMIN_PASSWORD
+#   2. docker compose up -d
+#   3. open http://<server-ip>:8080  →  sign in with admin / <your-password>
+#
+# To put Slipway behind your own reverse proxy (Caddy / Traefik / nginx),
+# drop the port mapping below and proxy to slipway:3000 instead.
+
+services:
+  slipway:
+    image: ghcr.io/slipway/server:1.4.2
+    # To build from source instead, comment out `image:` and uncomment:
+    # build: .
+    restart: unless-stopped
+    ports:
+      - "8080:3000"   # host:container — change 8080 to 80 if no reverse proxy
+    environment:
+      # Admin login — change these!
+      SLIPWAY_ADMIN_USER: ${SLIPWAY_ADMIN_USER:-admin}
+      SLIPWAY_ADMIN_PASSWORD: ${SLIPWAY_ADMIN_PASSWORD:-admin}
+
+      # Where Slipway stores its SQLite DB, certs, and uploaded artifacts
+      SLIPWAY_DATA_DIR: /data
+
+      # Set to true when running behind Caddy / Traefik / nginx (trusts X-Forwarded-*)
+      SLIPWAY_BEHIND_PROXY: ${SLIPWAY_BEHIND_PROXY:-false}
+
+      # Optional: cluster identifier shown in the UI
+      SLIPWAY_CLUSTER_ID: ${SLIPWAY_CLUSTER_ID:-helix-eu}
+
+      # Optional: timezone for cron schedules and log timestamps
+      TZ: ${TZ:-UTC}
+
+      # Optional: SMTP for email notifications
+      # SMTP_URL: smtp://postmark@smtp.postmarkapp.com:587
+    volumes:
+      - slipway-data:/data
+      # Slipway manages Docker containers on the host — mount the Docker socket.
+      # On rootless Docker or Podman, adjust accordingly.
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    # Resource hints — Slipway itself is light; project builds use more.
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+        reservations:
+          cpus: "0.5"
+          memory: 256m
+
+volumes:
+  slipway-data:
