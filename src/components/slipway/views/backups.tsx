@@ -12,6 +12,7 @@ import { cn } from '@/lib/utils'
 
 export function BackupsView() {
   const backups = useSlipway((s) => s.backups)
+  const schedules = useSlipway((s) => s.backupSchedules)
   const setNewBackupOpen = useSlipway((s) => s.setNewBackupOpen)
   const setNewBackupScheduleOpen = useSlipway((s) => s.setNewBackupScheduleOpen)
   const { toast } = useToast()
@@ -52,28 +53,27 @@ export function BackupsView() {
           </Button>
         </div>
         <div className="space-y-2">
-          {[
-            { name: 'helix-postgres', schedule: 'Every 6 hours', retention: '14 days', target: 'fra1-manager:/backups/pg' },
-            { name: 'helix-redis', schedule: 'Every 6 hours', retention: '7 days', target: 'fra1-manager:/backups/redis' },
-            { name: 'analytics-clickhouse', schedule: 'Daily at 03:00 UTC', retention: '30 days', target: 'fra1-manager:/backups/ch' },
-            { name: 'legacy-mysql', schedule: 'Daily at 02:00 UTC', retention: '30 days', target: 'sg1-standalone:/backups/mysql' },
-            { name: 'helix-uploads (volume)', schedule: 'Weekly on Sun at 01:00', retention: '90 days', target: 'fra1-manager:/backups/vol' },
-          ].map((s) => (
-            <div key={s.name} className="flex items-center gap-3 p-2.5 rounded-lg border border-border hover:bg-accent/30 transition-colors">
-              <div className="w-8 h-8 rounded-lg bg-muted flex items-center justify-center shrink-0">
-                <Archive size={13} />
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="text-[12px] font-medium font-mono truncate">{s.name}</div>
-                <div className="text-[10px] text-muted-foreground mt-0.5">
-                  <span className="font-mono">{s.schedule}</span> · keep {s.retention} · <span className="font-mono">{s.target}</span>
+          {schedules.length === 0 ? (
+            <div className="text-[12px] text-muted-foreground py-3 px-1">No backup schedules yet. Create one to back up a database or volume on a cron.</div>
+          ) : (
+            schedules.map((s) => (
+              <div key={s.id} className="flex items-center gap-3 p-2.5 rounded-lg border border-border hover:bg-accent/30 transition-colors">
+                <div className="w-8 h-8 rounded-lg bg-muted flex items-center justify-center shrink-0">
+                  <Archive size={13} />
                 </div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-[12px] font-medium font-mono truncate">{s.target}</div>
+                  <div className="text-[10px] text-muted-foreground mt-0.5">
+                    <span className="font-mono">{s.schedule}</span> · keep {s.retentionDays} days · <span className="font-mono">{s.targetKind}</span>
+                    {!s.active && <span className="ml-1 text-amber-500">· paused</span>}
+                  </div>
+                </div>
+                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => toast({ title: 'Schedule actions', description: `Edit/delete schedule for ${s.target}.` })}>
+                  <MoreHorizontal size={12} />
+                </Button>
               </div>
-              <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => toast({ title: 'Schedule actions', description: `Edit/delete schedule for ${s.name}.` })}>
-                <MoreHorizontal size={12} />
-              </Button>
-            </div>
-          ))}
+            ))
+          )}
         </div>
       </div>
 

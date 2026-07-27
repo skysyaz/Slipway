@@ -209,8 +209,15 @@ model DatabaseInstance {
   backupsEnabled    Boolean  @default(true)
   region            String   @default("local")
   dockerContainerId String?
-  createdAt         DateTime @default(now())
-  project           Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  // ponytail: credentials stored plaintext in local SQLite. The manager must be
+  // able to reveal them (same as Coolify). Encrypt at rest when a secrets
+  // backend / multi-node lands — not worth it for single-node self-host now.
+  username     String? // generated on provision (slipway / root / sa / none for redis)
+  password     String? // generated on provision
+  dbName       String? // the database name inside the engine (postgres/mysql/mongo)
+  internalPort Int?    // engine's in-container port (5432, 3306, …)
+  createdAt    DateTime @default(now())
+  project      Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
 }
 
 model Volume {

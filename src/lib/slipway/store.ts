@@ -9,6 +9,7 @@ import type {
   Volume,
   Server,
   BackupRecord,
+  BackupSchedule,
   Notification,
   ActivityEvent,
   LogLine,
@@ -51,6 +52,7 @@ interface SlipwayState {
   volumes: Volume[]
   servers: Server[]
   backups: BackupRecord[]
+  backupSchedules: BackupSchedule[]
   notifications: Notification[]
   activity: ActivityEvent[]
   logs: LogLine[]
@@ -108,11 +110,14 @@ interface SlipwayState {
   appendLogLine: (line: LogLine) => void
 
   // create actions
-  addDatabase: (input: Partial<DatabaseInstance>) => Promise<void>
+  addDatabase: (input: Partial<DatabaseInstance>) => Promise<DatabaseInstance & { password?: string; username?: string; dbName?: string }>
+  updateDatabase: (id: string, patch: Record<string, unknown>) => Promise<void>
+  deleteDatabase: (id: string, removeData: boolean) => Promise<void>
   addVolume: (input: Partial<Volume>) => Promise<void>
   addDomain: (projectId: string, hostname: string, type: Domain['type'], ssl: boolean) => Promise<void>
   runBackup: (target: string, targetKind: BackupRecord['targetKind']) => Promise<void>
   addBackupSchedule: (target: string, schedule: string, retentionDays: number) => Promise<void>
+  scanHost: () => Promise<{ projects: number; databases: number; volumes: number; skipped: number }>
   addServer: (input: Record<string, unknown>) => Promise<void>
   addService: (projectId: string, input: Record<string, unknown>) => Promise<void>
   restartService: (projectId: string, serviceId?: string) => Promise<void>
@@ -145,6 +150,7 @@ export const useSlipway = create<SlipwayState>((set, get) => ({
   volumes: [],
   servers: [],
   backups: [],
+  backupSchedules: [],
   notifications: [],
   activity: [],
   logs: [],
@@ -193,7 +199,7 @@ export const useSlipway = create<SlipwayState>((set, get) => ({
   },
 
   refetchAll: async () => {
-    const [projects, deployments, databases, volumes, servers, backups, notifications, activity, metrics] =
+    const [projects, deployments, databases, volumes, servers, backups, backupSchedules, notifications, activity, metrics] =
       await Promise.all([
         safeGet<Project[]>('/api/projects', []),
         safeGet<Deployment[]>('/api/deployments', []),
@@ -201,11 +207,12 @@ export const useSlipway = create<SlipwayState>((set, get) => ({
         safeGet<Volume[]>('/api/volumes', []),
         safeGet<Server[]>('/api/servers', []),
         safeGet<BackupRecord[]>('/api/backups', []),
+        safeGet<BackupSchedule[]>('/api/backups/schedules', []),
         safeGet<Notification[]>('/api/notifications', []),
         safeGet<ActivityEvent[]>('/api/activity', []),
         safeGet<Metrics>('/api/metrics', EMPTY_METRICS),
       ])
-    set({ projects, deployments, databases, volumes, servers, backups, notifications, activity, metrics })
+    set({ projects, deployments, databases, volumes, servers, backups, backupSchedules, notifications, activity, metrics })
   },
 
   refetch: async (keys) => {
@@ -216,6 +223,7 @@ export const useSlipway = create<SlipwayState>((set, get) => ({
     if (keys.includes('volumes')) tasks.push(safeGet<Volume[]>('/api/volumes', []).then((v) => set({ volumes: v })))
     if (keys.includes('servers')) tasks.push(safeGet<Server[]>('/api/servers', []).then((v) => set({ servers: v })))
     if (keys.includes('backups')) tasks.push(safeGet<BackupRecord[]>('/api/backups', []).then((v) => set({ backups: v })))
+    if (keys.includes('schedules')) tasks.push(safeGet<BackupSchedule[]>('/api/backups/schedules', []).then((v) => set({ backupSchedules: v })))
     if (keys.includes('notifications')) tasks.push(safeGet<Notification[]>('/api/notifications', []).then((v) => set({ notifications: v })))
     if (keys.includes('activity')) tasks.push(safeGet<ActivityEvent[]>('/api/activity', []).then((v) => set({ activity: v })))
     await Promise.all(tasks)
@@ -267,7 +275,18 @@ export const useSlipway = create<SlipwayState>((set, get) => ({
     set((s) => ({ logs: [...s.logs.slice(-200), line] })),
 
   addDatabase: async (input) => {
-    await api.post('/api/databases', input)
+    const created = await api.post<DatabaseInstance & { password?: string; username?: string; dbName?: string }>('/api/databases', input)
+    await get().refetch(['databases', 'activity', 'notifications'])
+    return created
+  },
+
+  updateDatabase: async (id, patch) => {
+    await api.patch(`/api/databases/${id}`, patch)
+    await get().refetch(['databases', 'activity', 'notifications'])
+  },
+
+  deleteDatabase: async (id, removeData) => {
+    await api.del(`/api/databases/${id}?removeData=${removeData ? 'true' : 'false'}`)
     await get().refetch(['databases', 'activity', 'notifications'])
   },
 
@@ -288,7 +307,13 @@ export const useSlipway = create<SlipwayState>((set, get) => ({
 
   addBackupSchedule: async (target, schedule, retentionDays) => {
     await api.post('/api/backups/schedules', { target, schedule, retentionDays })
-    await get().refetch(['activity', 'notifications'])
+    await get().refetch(['schedules', 'activity', 'notifications'])
+  },
+
+  scanHost: async () => {
+    const result = await api.post<{ projects: number; databases: number; volumes: number; skipped: number }>('/api/cluster/scan')
+    await get().refetch(['projects', 'databases', 'volumes', 'activity', 'notifications'])
+    return result
   },
 
   addServer: async (input) => {

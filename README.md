@@ -51,6 +51,16 @@ bun run start        # serves the standalone server
 - **Docker orchestration** — pull/build/run/restart/stop/remove/scale/backup
   through dockerode. Build logs stream over SSE; container stats feed the
   metrics charts. Single-node only.
+- **Managed databases** — New database provisions a real engine container
+  (Postgres/MySQL/MariaDB/Mongo/Redis/Valkey/MSSQL) with generated
+  credentials, a named data volume, and a published port. Credentials are
+  revealed once at create and re-recoverable from ⋯ → Show credentials.
+  Edit (rename / link / backups) and delete (with optional data-volume wipe)
+  act on the real container.
+- **Host scan** — "Scan host" imports containers/volumes already running on
+  the host into Slipway (existing apps → Projects, DB-image containers →
+  Databases marked `external`, volumes → Volumes) so a fresh install can
+  manage workloads it didn't create.
 - **Auth** — NextAuth v4: bcrypt-hashed credentials, JWT httpOnly sessions,
   env-gated GitHub/GitLab OAuth, and **TOTP 2FA** (setup → QR → verify; the
   sign-in gate requires a code when 2FA is on).
@@ -82,6 +92,10 @@ bun run start        # serves the standalone server
   env-gated and reflected in the UI.
 - **Scheduler** — single-instance (runs in the Next.js process). For a
   horizontally-scaled deployment, move scheduling to an external worker.
+- **Host scan does not detect domains/SSL** — those live in your reverse
+  proxy (Caddy/Traefik/Dokploy), which Slipway doesn't own. Imported DB
+  containers are marked `external` and Slipway does not know their password
+  (it didn't create them); use the credentials you set originally.
 
 ---
 

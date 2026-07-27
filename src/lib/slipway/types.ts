@@ -165,6 +165,11 @@ export interface DatabaseInstance {
   maxConnections: number
   backupsEnabled: boolean
   region: string
+  username?: string
+  hasPassword?: boolean
+  dbName?: string
+  internalPort?: number
+  dockerContainerId?: string
   createdAt: string
 }
 
@@ -208,6 +213,16 @@ export interface BackupRecord {
   schedule?: string
   retentionDays: number
   server: string
+}
+
+export interface BackupSchedule {
+  id: string
+  target: string
+  targetKind: string
+  schedule: string
+  retentionDays: number
+  active: boolean
+  createdAt: string
 }
 
 export interface LogLine {

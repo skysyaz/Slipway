@@ -19,12 +19,16 @@ import {
   History,
   Globe,
   Server,
+  ScanLine,
+  Loader2,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { useSlipway } from '@/lib/slipway/store'
+import { useAuth } from '../auth-provider'
 import { StackGlyph, StatusDot } from '../icons'
 import { TimeAgo, Duration, Sparkline, BytesShort, lastV } from '../format'
+import { useToast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
 import type { Deployment, Project } from '@/lib/slipway/types'
 
@@ -39,6 +43,25 @@ export function OverviewView() {
   const selectProject = useSlipway((s) => s.selectProject)
   const setNewDeploymentOpen = useSlipway((s) => s.setNewDeploymentOpen)
   const setView = useSlipway((s) => s.setView)
+  const scanHost = useSlipway((s) => s.scanHost)
+  const { user } = useAuth()
+  const { toast } = useToast()
+  const [scanning, setScanning] = React.useState(false)
+
+  const runScan = async () => {
+    setScanning(true)
+    try {
+      const r = await scanHost()
+      toast({
+        title: 'Host scan complete',
+        description: `Imported ${r.projects} app(s), ${r.databases} database(s), ${r.volumes} volume(s) — ${r.skipped} already managed.`,
+      })
+    } catch (e) {
+      toast({ title: 'Scan failed', description: (e as Error).message, variant: 'destructive' })
+    } finally {
+      setScanning(false)
+    }
+  }
 
   const healthyProjects = projects.filter((p) => p.status === 'running' && p.environment === 'production').length
   const totalReplicas = projects.reduce((a, p) => a + p.replicas, 0)
@@ -58,22 +81,32 @@ export function OverviewView() {
           <div className="max-w-2xl">
             <div className="flex items-center gap-2 text-[12px] text-muted-foreground font-mono mb-1">
               <CircleDot size={11} className="text-emerald-500 pulse-dot" />
-              cluster healthy · {servers.filter((s) => s.status === 'online').length}/{servers.length} servers online · 99.98% uptime this month
+              {servers.length ? (
+                <>cluster healthy · {servers.filter((s) => s.status === 'online').length}/{servers.length} servers online</>
+              ) : (
+                <>no servers registered yet</>
+              )}
             </div>
             <h1 className="text-2xl sm:text-[28px] font-semibold tracking-tight">
-              Welcome back, Mira.
+              Welcome back, {user?.username ?? 'admin'}.
             </h1>
             <p className="text-[14px] text-muted-foreground mt-1.5 leading-relaxed">
-              <strong className="text-foreground font-medium">{healthyProjects} production apps</strong> are running across{' '}
-              <strong className="text-foreground font-medium">{servers.length} servers</strong>.{' '}
+              <strong className="text-foreground font-medium">{healthyProjects} production app{healthyProjects === 1 ? '' : 's'}</strong> running across{' '}
+              <strong className="text-foreground font-medium">{servers.length} server{servers.length === 1 ? '' : 's'}</strong>.{' '}
               {inFlightDeploy ? (
                 <>A deployment of <strong className="text-foreground font-medium">{inFlightDeploy.projectName}</strong> is in flight.</>
-              ) : (
+              ) : deployments[0] ? (
                 <>Last deploy was <TimeAgo ts={deployments[0]?.createdAt} />.</>
+              ) : (
+                <>No deployments yet — create one to get started.</>
               )}
             </p>
           </div>
           <div className="flex gap-2 shrink-0">
+            <Button variant="outline" size="sm" className="h-9" onClick={runScan} disabled={scanning}>
+              {scanning ? <Loader2 size={14} className="mr-1.5 animate-spin" /> : <ScanLine size={14} className="mr-1.5" />}
+              Scan host
+            </Button>
             <Button variant="outline" size="sm" className="h-9" onClick={() => setView('cli')}>
               <Zap size={14} className="mr-1.5" />
               Install CLI
@@ -93,18 +126,14 @@ export function OverviewView() {
           value={deployments.filter((d) => d.status === 'building' || d.status === 'deploying').length}
           sub={`${monthlyDeploys} deploys this month`}
           icon={Rocket}
-          trend="+12%"
-          trendUp
           spark={metrics.deployFrequency.data.map((p) => p.v)}
           color="oklch(0.7 0.17 158)"
         />
         <StatCard
           label="Avg success rate"
-          value={`${avgSuccess}%`}
+          value={projects.length ? `${avgSuccess}%` : '—'}
           sub="across all projects"
           icon={ShieldCheck}
-          trend="+0.4%"
-          trendUp
           spark={metrics.errorRate.data.map((p) => 100 - p.v)}
           color="oklch(0.7 0.17 158)"
         />
@@ -122,8 +151,6 @@ export function OverviewView() {
           value={p95 != null ? `${Math.round(p95)}ms` : '—'}
           sub="across production services"
           icon={Activity}
-          trend="-8ms"
-          trendUp
           spark={metrics.p95Latency.data.map((p) => p.v)}
           color="oklch(0.78 0.16 70)"
         />
@@ -166,7 +193,7 @@ function StatCard({
   value: string | number
   sub: string
   icon: React.ComponentType<{ size?: number; className?: string }>
-  trend: string
+  trend?: string
   trendUp?: boolean
   spark: number[]
   color: string
@@ -178,15 +205,17 @@ function StatCard({
           <Icon size={12} />
           {label}
         </div>
-        <span
-          className={cn(
-            'inline-flex items-center gap-0.5 text-[11px] font-medium',
-            trendUp ? 'text-emerald-500' : 'text-muted-foreground',
-          )}
-        >
-          {trendUp ? <ArrowUpRight size={11} /> : <ArrowDownRight size={11} />}
-          {trend}
-        </span>
+        {trend && (
+          <span
+            className={cn(
+              'inline-flex items-center gap-0.5 text-[11px] font-medium',
+              trendUp ? 'text-emerald-500' : 'text-muted-foreground',
+            )}
+          >
+            {trendUp ? <ArrowUpRight size={11} /> : <ArrowDownRight size={11} />}
+            {trend}
+          </span>
+        )}
       </div>
       <div className="mt-2 flex items-end justify-between gap-2">
         <div>
@@ -369,7 +398,7 @@ function ClusterHealth({
   const online = servers.filter((s) => s.status === 'online').length
   const totalDiskUsed = servers.reduce((a, s) => a + s.diskUsedGb, 0)
   const totalDisk = servers.reduce((a, s) => a + s.diskGb, 0)
-  const diskPct = Math.round((totalDiskUsed / totalDisk) * 100)
+  const diskPct = totalDisk ? Math.round((totalDiskUsed / totalDisk) * 100) : 0
   const dbRunning = databases.filter((d) => d.status === 'running').length
 
   return (
@@ -380,7 +409,7 @@ function ClusterHealth({
           Cluster health
         </div>
         <Badge variant="outline" className="text-[10px] h-5">
-          helix-eu · 4 nodes
+          {servers.length} node{servers.length === 1 ? '' : 's'}
         </Badge>
       </div>
       <div className="p-4 space-y-3">
@@ -459,6 +488,8 @@ function ActivityFeed({ activity }: { activity: any[] }) {
 }
 
 function UpcomingMaintenance() {
+  // ponytail: was a hardcoded list of fake maintenance items. No scheduled-job
+  // model exists yet, so show an honest empty state instead of invented data.
   return (
     <div className="rounded-xl border border-border bg-card">
       <div className="h-11 px-4 flex items-center justify-between border-b border-border">
@@ -467,21 +498,10 @@ function UpcomingMaintenance() {
           Upcoming
         </div>
       </div>
-      <div className="p-4 space-y-2.5">
-        {[
-          { title: 'Slipway 1.4.3', body: 'Rolling upgrade · zero downtime · 4 min', when: 'Tomorrow 02:00 UTC', color: 'oklch(0.65 0.18 250)' },
-          { title: 'helix-postgres vacuum', body: 'Scheduled maintenance · read replicas stay up', when: 'Sun 03:00 UTC', color: 'oklch(0.78 0.16 70)' },
-          { title: 'SSL renewal · helix-api.com', body: 'Auto-renew via Let’s Encrypt', when: 'in 47 days', color: 'oklch(0.7 0.17 158)' },
-        ].map((item) => (
-          <div key={item.title} className="flex items-start gap-2.5">
-            <span className="w-1.5 h-1.5 rounded-full mt-1.5 shrink-0" style={{ background: item.color }} />
-            <div className="flex-1 min-w-0">
-              <div className="text-[12px] font-medium">{item.title}</div>
-              <div className="text-[11px] text-muted-foreground mt-0.5 leading-snug">{item.body}</div>
-              <div className="text-[10px] text-muted-foreground mt-1 font-mono">{item.when}</div>
-            </div>
-          </div>
-        ))}
+      <div className="p-4">
+        <p className="text-[12px] text-muted-foreground leading-snug">
+          No scheduled maintenance. Backup schedules run automatically — see Backups.
+        </p>
       </div>
     </div>
   )

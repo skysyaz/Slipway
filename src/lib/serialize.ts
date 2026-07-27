@@ -161,6 +161,11 @@ export function serializeDatabase(d: {
   maxConnections: number
   backupsEnabled: boolean
   region: string
+  username: string | null
+  password: string | null
+  dbName: string | null
+  internalPort: number | null
+  dockerContainerId: string | null
   createdAt: Date
 }) {
   return {
@@ -178,7 +183,14 @@ export function serializeDatabase(d: {
     maxConnections: d.maxConnections,
     backupsEnabled: d.backupsEnabled,
     region: d.region,
+    username: d.username ?? undefined,
+    hasPassword: !!d.password,
+    dbName: d.dbName ?? undefined,
+    internalPort: d.internalPort ?? undefined,
+    dockerContainerId: d.dockerContainerId ?? undefined,
     createdAt: d.createdAt.toISOString(),
+    // password is intentionally NOT serialized here — reveal it only via the
+    // dedicated /api/databases/:id/credentials route.
   }
 }
 

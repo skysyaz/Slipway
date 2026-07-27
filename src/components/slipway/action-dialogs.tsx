@@ -36,6 +36,7 @@ import {
   ShieldCheck,
   Plus,
   Loader2,
+  Copy,
 } from 'lucide-react'
 import { useSlipway } from '@/lib/slipway/store'
 import { api } from '@/lib/api'
@@ -56,11 +57,14 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
 
 function useSubmit() {
   const [submitting, setSubmitting] = React.useState(false)
-  const run = async (fn: () => void) => {
+  const run = async <T,>(fn: () => T | Promise<T>): Promise<T> => {
     setSubmitting(true)
-    await new Promise((r) => setTimeout(r, 400))
-    fn()
-    setSubmitting(false)
+    try {
+      await new Promise((r) => setTimeout(r, 400))
+      return await fn()
+    } finally {
+      setSubmitting(false)
+    }
   }
   return { submitting, run }
 }
@@ -94,6 +98,8 @@ export function NewDatabaseDialog() {
   const [size, setSize] = React.useState('20')
   const [projectId, setProjectId] = React.useState('')
   const [backups, setBackups] = React.useState(true)
+  // one-time credentials reveal after a successful (real) provision
+  const [creds, setCreds] = React.useState<{ username?: string; password?: string; dbName?: string; host?: string; port?: number } | null>(null)
 
   React.useEffect(() => {
     if (!open) {
@@ -103,6 +109,7 @@ export function NewDatabaseDialog() {
       setSize('20')
       setProjectId('')
       setBackups(true)
+      setCreds(null)
     }
   }, [open])
 
@@ -207,29 +214,87 @@ export function NewDatabaseDialog() {
         </div>
 
         <DialogFooter>
-          <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
-          <Button
-            disabled={!name || submitting}
-            onClick={() => run(() => {
-              addDatabase({
-                name,
-                kind: kind as any,
-                version,
-                storageGb: parseInt(size),
-                projectId: projectId || undefined,
-                port: databasePorts[kind] ?? 5432,
-                backupsEnabled: backups,
-              })
-              toast({ title: 'Database created', description: `${name} (${engineLabel} ${version}) is running and ready.` })
-            })}
-            className="gap-2"
-          >
-            {submitting ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
-            Create database
-          </Button>
+          {creds ? (
+            <>
+              <div className="flex-1 rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-3 space-y-2">
+                <div className="flex items-center gap-1.5 text-[11px] font-semibold text-emerald-600">
+                  <ShieldCheck size={12} /> Database provisioned — save these credentials
+                </div>
+                <CredRow label="Username" value={creds.username} />
+                <CredRow label="Password" value={creds.password} mono />
+                {creds.dbName && <CredRow label="Database" value={creds.dbName} mono />}
+                <CredRow label="Host" value={`${creds.host || 'localhost'}:${creds.port}`} mono />
+                <p className="text-[10px] text-muted-foreground leading-snug">
+                  You can reveal the password again any time from the database&apos;s ⋯ menu → Show credentials.
+                </p>
+              </div>
+              <Button onClick={() => setOpen(false)} className="gap-2">Done</Button>
+            </>
+          ) : (
+            <>
+              <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
+              <Button
+                disabled={!name || submitting}
+                onClick={() =>
+                  run(async () => {
+                    try {
+                      const created = await addDatabase({
+                        name,
+                        kind: kind as any,
+                        version,
+                        storageGb: parseInt(size),
+                        projectId: projectId || undefined,
+                        port: databasePorts[kind] ?? 5432,
+                        backupsEnabled: backups,
+                      })
+                      setCreds({
+                        username: (created as { username?: string }).username,
+                        password: (created as { password?: string }).password,
+                        dbName: (created as { dbName?: string }).dbName,
+                        host: (created as { host?: string }).host,
+                        port: (created as { port?: number }).port,
+                      })
+                      toast({ title: 'Database ready', description: `${name} (${engineLabel} ${version}) is running on localhost:${databasePorts[kind] ?? 5432}.` })
+                    } catch (e) {
+                      toast({ title: 'Could not create database', description: (e as Error).message, variant: 'destructive' })
+                    }
+                  })
+                }
+                className="gap-2"
+              >
+                {submitting ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
+                Create database
+              </Button>
+            </>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  )
+}
+
+function CredRow({ label, value, mono }: { label: string; value?: string; mono?: boolean }) {
+  const { toast } = useToast()
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <span className="text-[10px] text-muted-foreground uppercase tracking-wider">{label}</span>
+      <div className="flex items-center gap-1.5 min-w-0">
+        <code className={cn('text-[12px] truncate', mono && 'font-mono')}>{value || '—'}</code>
+        {value && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-6 w-6 p-0"
+            onClick={() => {
+              navigator.clipboard?.writeText(value)
+              toast({ title: 'Copied' })
+            }}
+          >
+            <Copy size={11} />
+          </Button>
+        )}
+      </div>
+    </div>
   )
 }
 

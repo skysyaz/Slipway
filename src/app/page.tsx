@@ -64,14 +64,14 @@ function AppShell() {
         </main>
         <footer className="mt-auto border-t border-border py-4 px-6 text-[11px] text-muted-foreground flex items-center justify-between flex-wrap gap-2">
           <div className="flex items-center gap-3">
-            <span className="font-mono">Slipway v1.4.2 · self-hosted</span>
+            <span className="font-mono">Slipway · self-hosted</span>
             <span className="text-border">·</span>
             <a href="#" onClick={(e) => e.preventDefault()} className="hover:text-foreground transition-colors">Docs</a>
             <a href="#" onClick={(e) => e.preventDefault()} className="hover:text-foreground transition-colors">GitHub</a>
             <a href="#" onClick={(e) => e.preventDefault()} className="hover:text-foreground transition-colors">Apache 2.0</a>
           </div>
           <div className="font-mono">
-            cluster: helix-eu · region: eu-fra1 · uptime 99.98%
+            self-hosted deployment platform
           </div>
         </footer>
       </div>

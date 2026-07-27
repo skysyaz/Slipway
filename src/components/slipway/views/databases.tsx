@@ -14,16 +14,57 @@ import {
   Copy,
   MoreHorizontal,
   Boxes,
+  KeyRound,
+  Pencil,
+  Trash2,
+  Loader2,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
+import { Switch } from '@/components/ui/switch'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from '@/components/ui/dialog'
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+} from '@/components/ui/dropdown-menu'
+import {
+  AlertDialog,
+  AlertDialogTrigger,
+  AlertDialogContent,
+  AlertDialogHeader,
+  AlertDialogFooter,
+  AlertDialogTitle,
+  AlertDialogDescription,
+  AlertDialogAction,
+  AlertDialogCancel,
+} from '@/components/ui/alert-dialog'
+import {
+  Select,
+  SelectTrigger,
+  SelectValue,
+  SelectContent,
+  SelectItem,
+} from '@/components/ui/select'
 import { useSlipway } from '@/lib/slipway/store'
+import { api, ApiError } from '@/lib/api'
 import { DbGlyph, StatusDot } from '../icons'
 import { TimeAgo, BytesShort } from '../format'
 import { useToast, toast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
+import type { DatabaseInstance } from '@/lib/slipway/types'
 
 export function DatabasesView() {
   const databases = useSlipway((s) => s.databases)
@@ -148,7 +189,6 @@ export function DatabasesView() {
                   created <TimeAgo ts={db.createdAt} className="text-[10px]" />
                 </div>
                 <div className="flex items-center gap-1">
-                  <CopyButton text={`postgres://••••@${db.host}:${db.port}/${db.name}`} />
                   <Button variant="outline" size="sm" className="h-7 text-[11px]" onClick={() => restartService('prj-api', db.id)}>
                     <RotateCcw size={10} className="mr-1" />
                     Restart
@@ -157,11 +197,208 @@ export function DatabasesView() {
                     <Archive size={10} className="mr-1" />
                     Backup
                   </Button>
+                  <DatabaseActions db={db} />
                 </div>
               </div>
             </div>
           )
         })}
+      </div>
+    </div>
+  )
+}
+
+// Real per-database actions: show credentials, edit, delete (with data-volume
+// option). Replaces the previous stub "⋯" that only fired a toast.
+function DatabaseActions({ db }: { db: DatabaseInstance }) {
+  const { toast } = useToast()
+  const updateDatabase = useSlipway((s) => s.updateDatabase)
+  const deleteDatabase = useSlipway((s) => s.deleteDatabase)
+  const selectProject = useSlipway((s) => s.selectProject)
+  const projects = useSlipway((s) => s.projects)
+
+  const [credsOpen, setCredsOpen] = React.useState(false)
+  const [editOpen, setEditOpen] = React.useState(false)
+  const [delOpen, setDelOpen] = React.useState(false)
+  const [removeData, setRemoveData] = React.useState(false)
+  const [busy, setBusy] = React.useState(false)
+
+  const [creds, setCreds] = React.useState<{ username?: string; password?: string; dbName?: string; connectionString?: string; note?: string } | null>(null)
+  const [editName, setEditName] = React.useState(db.name)
+  const [editProject, setEditProject] = React.useState(db.projectId ?? '')
+  const [editBackups, setEditBackups] = React.useState(db.backupsEnabled)
+
+  const showCreds = async () => {
+    setCredsOpen(true)
+    setCreds(null)
+    try {
+      const c = await api.get<{ username?: string; password?: string; dbName?: string; connectionString: string; note?: string }>(`/api/databases/${db.id}/credentials`)
+      setCreds(c)
+    } catch (e) {
+      toast({ title: 'Could not load credentials', description: (e as Error).message, variant: 'destructive' })
+    }
+  }
+
+  const saveEdit = async () => {
+    setBusy(true)
+    try {
+      await updateDatabase(db.id, {
+        name: editName,
+        projectId: editProject || null,
+        backupsEnabled: editBackups,
+      })
+      toast({ title: 'Database updated' })
+      setEditOpen(false)
+    } catch (e) {
+      toast({ title: 'Update failed', description: (e as Error).message, variant: 'destructive' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const confirmDelete = async () => {
+    setBusy(true)
+    try {
+      await deleteDatabase(db.id, removeData)
+      toast({ title: 'Database removed', description: removeData ? 'Container and data volume deleted.' : 'Container removed. Data volume kept.' })
+      setDelOpen(false)
+    } catch (e) {
+      toast({ title: 'Delete failed', description: (e as Error).message, variant: 'destructive' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button variant="ghost" size="sm" className="h-7 w-7 p-0">
+            <MoreHorizontal size={13} />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-44">
+          <DropdownMenuItem onClick={showCreds}>
+            <KeyRound size={12} className="mr-2" /> Show credentials
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => { setEditName(db.name); setEditProject(db.projectId ?? ''); setEditBackups(db.backupsEnabled); setEditOpen(true) }}>
+            <Pencil size={12} className="mr-2" /> Edit
+          </DropdownMenuItem>
+          {db.projectId && (
+            <DropdownMenuItem onClick={() => selectProject(db.projectId!)}>
+              <ChevronRight size={12} className="mr-2" /> Open project
+            </DropdownMenuItem>
+          )}
+          <DropdownMenuSeparator />
+          <DropdownMenuItem className="text-rose-500 focus:text-rose-500" onClick={() => { setRemoveData(false); setDelOpen(true) }}>
+            <Trash2 size={12} className="mr-2" /> Delete…
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+
+      {/* Credentials */}
+      <Dialog open={credsOpen} onOpenChange={setCredsOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-base">
+              <KeyRound size={16} className="text-primary" /> {db.name} credentials
+            </DialogTitle>
+            <DialogDescription>Connection details for your {db.kind} database.</DialogDescription>
+          </DialogHeader>
+          {!creds ? (
+            <div className="flex items-center justify-center py-6"><Loader2 size={16} className="animate-spin text-muted-foreground" /></div>
+          ) : (
+            <div className="space-y-2 py-1">
+              <CredLine label="Username" value={creds.username} />
+              <CredLine label="Password" value={creds.password} mono />
+              {creds.dbName && <CredLine label="Database" value={creds.dbName} mono />}
+              <CredLine label="Connection string" value={creds.connectionString} mono />
+              {creds.note && <p className="text-[11px] text-amber-600 leading-snug pt-1">{creds.note}</p>}
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Edit */}
+      <Dialog open={editOpen} onOpenChange={setEditOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-base">
+              <Pencil size={16} className="text-primary" /> Edit {db.name}
+            </DialogTitle>
+            <DialogDescription>Engine, version, storage, and port can&apos;t change on a running database.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 py-1">
+            <div className="space-y-1.5">
+              <Label className="text-[11px] font-medium">Name</Label>
+              <Input value={editName} onChange={(e) => setEditName(e.target.value)} className="font-mono text-[13px]" />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-[11px] font-medium">Link to project</Label>
+              <Select value={editProject} onValueChange={setEditProject}>
+                <SelectTrigger className="h-9 text-[13px]"><SelectValue placeholder="— (shared)" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="">— (shared)</SelectItem>
+                  {projects.map((p) => (<SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex items-center justify-between rounded-lg border border-border p-3">
+              <div className="text-[12px] font-medium">Automatic backups</div>
+              <Switch checked={editBackups} onCheckedChange={setEditBackups} />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setEditOpen(false)}>Cancel</Button>
+            <Button disabled={busy || !editName} onClick={saveEdit} className="gap-2">
+              {busy && <Loader2 size={13} className="animate-spin" />} Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete */}
+      <AlertDialog open={delOpen} onOpenChange={setDelOpen}>
+        <AlertDialogContent className="max-w-md">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete {db.name}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This stops and removes the {db.kind} container. The database row is deleted. This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <label className="flex items-center gap-2 text-[12px] py-2 cursor-pointer">
+            <input type="checkbox" checked={removeData} onChange={(e) => setRemoveData(e.target.checked)} className="accent-rose-500" />
+            Also delete the data volume (irreversible — all data is lost)
+          </label>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={confirmDelete}
+              className="bg-rose-600 hover:bg-rose-600/90 text-white"
+              disabled={busy}
+            >
+              {busy ? <Loader2 size={13} className="animate-spin mr-1" /> : null}
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
+  )
+}
+
+function CredLine({ label, value, mono }: { label: string; value?: string; mono?: boolean }) {
+  const { toast } = useToast()
+  return (
+    <div className="flex items-center justify-between gap-2 rounded-md border border-border px-2.5 py-1.5">
+      <span className="text-[10px] text-muted-foreground uppercase tracking-wider shrink-0">{label}</span>
+      <div className="flex items-center gap-1.5 min-w-0">
+        <code className={cn('text-[12px] truncate', mono && 'font-mono')}>{value || '—'}</code>
+        {value && (
+          <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={() => { navigator.clipboard?.writeText(value); toast({ title: 'Copied' }) }}>
+            <Copy size={11} />
+          </Button>
+        )}
       </div>
     </div>
   )
@@ -181,22 +418,5 @@ function QuickStat({ label, value, icon: Icon, color }: { label: string; value: 
         <div className="text-[18px] font-semibold tabular-nums">{value}</div>
       </div>
     </div>
-  )
-}
-
-function CopyButton({ text }: { text: string }) {
-  const { toast } = useToast()
-  return (
-    <Button
-      variant="ghost"
-      size="sm"
-      className="h-7 w-7 p-0"
-      onClick={() => {
-        navigator.clipboard?.writeText(text)
-        toast({ title: 'Connection string copied' })
-      }}
-    >
-      <Copy size={11} />
-    </Button>
   )
 }

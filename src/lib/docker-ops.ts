@@ -19,6 +19,7 @@
  * Phase 3 (src/lib/cluster.ts).
  */
 import type Docker from "dockerode"
+import { randomBytes } from "node:crypto"
 import { db } from "./db"
 import { emit, recordActivity } from "./notify"
 import type { DeployOptions } from "./simulate"
@@ -464,4 +465,441 @@ export async function realBackup(
     throw e
   }
   return backup.id
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Managed databases — provision/remove real engine containers.
+//
+// ponytail scope: host=localhost + a published host port → works from the host
+// machine (psql, the dashboard user). App containers inside Docker can't reach
+// localhost:<port> (that's their own loopback); inter-container access needs a
+// shared `slipway` Docker network attached to both app and db containers, and
+// app containers currently publish no ports / join no network. That wiring is
+// a follow-up — not faked here.
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface EngineSpec {
+  image: (version: string) => string
+  internalPort: number
+  dataDir: string
+  defaultUser: string | null // null = no username (redis/valkey)
+  env: (user: string, password: string, dbName: string) => string[]
+  cmd?: (password: string) => string[]
+  // name of the env var holding the password, for sanity in error messages
+  passwordLabel: string
+}
+
+const ENGINE_SPECS: Record<string, EngineSpec> = {
+  postgres: {
+    image: (v) => `postgres:${v}`,
+    internalPort: 5432,
+    dataDir: "/var/lib/postgresql/data",
+    defaultUser: "slipway",
+    env: (u, p, d) => [`POSTGRES_USER=${u}`, `POSTGRES_PASSWORD=${p}`, `POSTGRES_DB=${d}`],
+    passwordLabel: "POSTGRES_PASSWORD",
+  },
+  mysql: {
+    image: (v) => `mysql:${v}`,
+    internalPort: 3306,
+    dataDir: "/var/lib/mysql",
+    defaultUser: "slipway",
+    env: (u, p, d) => [
+      `MYSQL_ROOT_PASSWORD=${p}`,
+      `MYSQL_USER=${u}`,
+      `MYSQL_PASSWORD=${p}`,
+      `MYSQL_DATABASE=${d}`,
+    ],
+    passwordLabel: "MYSQL_PASSWORD",
+  },
+  mariadb: {
+    image: (v) => `mariadb:${v}`,
+    internalPort: 3306,
+    dataDir: "/var/lib/mysql",
+    defaultUser: "slipway",
+    env: (u, p, d) => [
+      `MARIADB_ROOT_PASSWORD=${p}`,
+      `MARIADB_USER=${u}`,
+      `MARIADB_PASSWORD=${p}`,
+      `MARIADB_DATABASE=${d}`,
+    ],
+    passwordLabel: "MARIADB_PASSWORD",
+  },
+  mongodb: {
+    image: (v) => `mongo:${v}`,
+    internalPort: 27017,
+    dataDir: "/data/db",
+    defaultUser: "root",
+    env: (u, p) => [`MONGO_INITDB_ROOT_USERNAME=${u}`, `MONGO_INITDB_ROOT_PASSWORD=${p}`],
+    passwordLabel: "MONGO_INITDB_ROOT_PASSWORD",
+  },
+  redis: {
+    image: (v) => `redis:${v}`,
+    internalPort: 6379,
+    dataDir: "/data",
+    defaultUser: null,
+    env: () => [],
+    cmd: (p) => ["redis-server", "--requirepass", p],
+    passwordLabel: "requirepass",
+  },
+  valkey: {
+    image: (v) => `valkey/valkey:${v}`,
+    internalPort: 6379,
+    dataDir: "/data",
+    defaultUser: null,
+    env: () => [],
+    cmd: (p) => ["valkey-server", "--requirepass", p],
+    passwordLabel: "requirepass",
+  },
+  mssql: {
+    image: (v) => `mcr.microsoft.com/mssql/server:${v}`,
+    internalPort: 1433,
+    dataDir: "/var/opt/mssql",
+    defaultUser: "sa",
+    // SA_PASSWORD must be ≥8 chars, upper+lower+digit. Append a fixed suffix
+    // to guarantee complexity regardless of the random portion.
+    env: (u, p) => [`ACCEPT_EULA=Y`, `SA_PASSWORD=${p}Aa1!`, `MSSQL_PID=Express`],
+    passwordLabel: "SA_PASSWORD",
+  },
+}
+
+function genPassword(): string {
+  return randomBytes(18).toString("base64url")
+}
+
+function sanitizeDbName(name: string): string {
+  const s = name.toLowerCase().replace(/[^a-z0-9_]/g, "_").replace(/^_+|_+$/g, "")
+  return s || "slipway"
+}
+
+function dbContainerName(id: string, name: string): string {
+  const slug = name.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/^-+|-+$/g, "") || "db"
+  return `slipway-db-${slug}-${id.slice(-6)}`
+}
+
+/**
+ * Provision a real engine container for an existing DatabaseInstance row.
+ * Pulls the image, creates + starts the container with credentials env, a
+ * named data volume, and a published host port. Updates the row with the real
+ * containerId/host/credentials on success; marks status=failed and rethrows on
+ * any error (honest — the caller surfaces a 503/500, no fake "running").
+ */
+export async function realProvisionDatabase(
+  dbInstanceId: string,
+  actor = "you"
+): Promise<void> {
+  const spec = await db.databaseInstance.findUnique({ where: { id: dbInstanceId } })
+  if (!spec) throw new Error("Database not found")
+  const engine = ENGINE_SPECS[spec.kind]
+  if (!engine) throw new Error(`Unsupported database engine: ${spec.kind}`)
+
+  const docker = await getDocker()
+  const username = engine.defaultUser ?? ""
+  const password = genPassword()
+  const dbName = sanitizeDbName(spec.name)
+  const containerNameStr = dbContainerName(spec.id, spec.name)
+  const volumeName = `slipway-db-${spec.id}`
+
+  try {
+    await db.databaseInstance.update({
+      where: { id: dbInstanceId },
+      data: { status: "restarting", username: username || null, password, dbName },
+    })
+
+    await pullImage(docker, engine.image(spec.version))
+
+    // a named volume persists data across container recreation
+    try {
+      await docker.getVolume(volumeName).inspect()
+    } catch {
+      await docker.createVolume({ Name: volumeName })
+    }
+
+    const env = engine.env(username, password, dbName)
+    const created = await docker.createContainer({
+      Image: engine.image(spec.version),
+      name: containerNameStr,
+      ...(engine.cmd ? { Cmd: engine.cmd(password) } : {}),
+      Env: env,
+      HostConfig: {
+        RestartPolicy: { Name: "unless-stopped" },
+        PortBindings: {
+          [`${engine.internalPort}/tcp`]: [{ HostPort: String(spec.port) }],
+        },
+        Binds: [`${volumeName}:${engine.dataDir}`],
+      },
+    })
+    await created.start()
+
+    const info = await created.inspect()
+    if (info.State?.Running !== true) throw new Error("database container exited after start")
+
+    await db.databaseInstance.update({
+      where: { id: dbInstanceId },
+      data: {
+        dockerContainerId: created.id,
+        host: "localhost",
+        internalPort: engine.internalPort,
+        status: "running",
+      },
+    })
+    await recordActivity("database", `provisioned ${spec.kind} database "${spec.name}"`, { actor })
+    await emit(
+      "database.provisioned",
+      "database",
+      `provisioned ${spec.kind} database "${spec.name}"`,
+      {
+        title: "Database ready",
+        body: `${spec.name} (${spec.kind} ${spec.version}) is running on localhost:${spec.port}.`,
+        level: "success",
+        kind: "database",
+      },
+      { actor }
+    )
+  } catch (e) {
+    const msg = (e as Error).message
+    await db.databaseInstance.update({
+      where: { id: dbInstanceId },
+      data: { status: "failed" },
+    })
+    await emit(
+      "database.failed",
+      "database",
+      `failed to provision ${spec.kind} database "${spec.name}": ${msg}`,
+      {
+        title: "Database provisioning failed",
+        body: `${spec.name}: ${msg}`,
+        level: "error",
+        kind: "database",
+      },
+      { actor }
+    )
+    throw e
+  }
+}
+
+/**
+ * Stop + remove the database container. If removeData, also drop the named
+ * volume (irreversible). Best-effort on the container/volume side; the row is
+ * deleted by the caller regardless.
+ */
+export async function realRemoveDatabase(
+  dbInstanceId: string,
+  removeData: boolean,
+  actor = "you"
+): Promise<void> {
+  const row = await db.databaseInstance.findUnique({ where: { id: dbInstanceId } })
+  if (!row) return
+  const volumeName = `slipway-db-${row.id}`
+
+  // only touch Docker if the engine is actually up
+  const { isDockerAvailable } = await import("./docker")
+  if (await isDockerAvailable()) {
+    const docker = await getDocker().catch(() => null)
+    if (docker) {
+      if (row.dockerContainerId) {
+        try {
+          const c = docker.getContainer(row.dockerContainerId)
+          await c.remove({ force: true })
+        } catch {
+          /* container already gone */
+        }
+      }
+      if (removeData) {
+        try {
+          await docker.getVolume(volumeName).remove({ force: true })
+        } catch {
+          /* volume already gone */
+        }
+      }
+    }
+  }
+
+  await recordActivity("database", `removed ${row.kind} database "${row.name}"`, { actor })
+  await emit(
+    "database.deleted",
+    "database",
+    `removed ${row.kind} database "${row.name}"`,
+    {
+      title: "Database removed",
+      body: `${row.name} was removed${removeData ? " (data volume deleted)" : ""}.`,
+      level: "info",
+      kind: "database",
+    },
+    { actor }
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Host scan — discover existing Docker containers/volumes on the host and
+// import them as Slipway resources so a freshly-installed Slipway can manage
+// workloads that were already running (not just ones it created).
+//
+// Honest scope:
+//  - containers → Projects (image source) or DatabaseInstance (DB images),
+//    linked to the real containerId so restart/stop/remove act on the real
+//    container. Slipway did NOT create these, so for DBs it records no
+//    password (status "external"); the credentials route says so honestly.
+//  - volumes → Volume rows (size best-effort 0; Docker doesn't report usage
+//    without a stat call per-volume).
+//  - domains / SSL are NOT detected — those live in the reverse proxy
+//    (Caddy/Traefik/Dokploy), which Slipway doesn't own. Add a proxy-reader
+//    when a specific proxy is in scope.
+//  - skip Slipway-managed resources (name prefix `slipway-`) and anything
+//    already imported (matched by dockerContainerId / volume name).
+// ─────────────────────────────────────────────────────────────────────────────
+
+const DB_IMAGE_MATCHERS: { kind: string; test: (image: string) => boolean }[] = [
+  { kind: "postgres", test: (i) => /^postgres(:|@|$)/.test(i) || i.includes("/postgres:") },
+  { kind: "mysql", test: (i) => /^mysql(:|@|$)/.test(i) },
+  { kind: "mariadb", test: (i) => /^mariadb(:|@|$)/.test(i) || i.includes("/mariadb:") },
+  { kind: "mongodb", test: (i) => /^mongo(:|@|$)/.test(i) },
+  { kind: "redis", test: (i) => /^redis(:|@|$)/.test(i) || i.includes("/redis:") },
+  { kind: "valkey", test: (i) => /^valkey(:|@|$)/.test(i) || i.includes("/valkey:") },
+  { kind: "mssql", test: (i) => i.includes("mssql/server") },
+]
+
+const DB_DEFAULT_PORT: Record<string, number> = {
+  postgres: 5432,
+  mysql: 3306,
+  mariadb: 3306,
+  mongodb: 27017,
+  redis: 6379,
+  valkey: 6379,
+  mssql: 1433,
+}
+
+function detectDbKind(image: string): string | null {
+  const repo = image.split(":")[0].split("@")[0].split("/").pop() || ""
+  for (const m of DB_IMAGE_MATCHERS) {
+    if (m.test(image) || m.test(repo)) return m.kind
+  }
+  return null
+}
+
+function slugify(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "app"
+}
+
+function statusFromState(state: string): string {
+  if (state === "running") return "running"
+  if (state === "restarting") return "restarting"
+  if (state === "paused") return "paused"
+  return "stopped"
+}
+
+export async function realScanHost(actor = "you"): Promise<{
+  projects: number
+  databases: number
+  volumes: number
+  skipped: number
+}> {
+  const docker = await getDocker()
+  const result = { projects: 0, databases: 0, volumes: 0, skipped: 0 }
+
+  // --- containers ---
+  const containers = await docker.listContainers({ all: true })
+  const existingProjectContainers = new Set(
+    (await db.project.findMany({ where: { dockerContainerId: { not: null } }, select: { dockerContainerId: true } }))
+      .map((p) => p.dockerContainerId as string)
+  )
+  const existingDbContainers = new Set(
+    (await db.databaseInstance.findMany({ where: { dockerContainerId: { not: null } }, select: { dockerContainerId: true } }))
+      .map((d) => d.dockerContainerId as string)
+  )
+
+  for (const c of containers) {
+    const name = (c.Names?.[0] || "").replace(/^\//, "")
+    // skip Slipway-managed + already-imported
+    if (name.startsWith("slipway-") || existingProjectContainers.has(c.Id) || existingDbContainers.has(c.Id)) {
+      result.skipped++
+      continue
+    }
+    const image = c.Image || ""
+    const dbKind = detectDbKind(image)
+    const publicPort = c.Ports?.find((p) => p.PublicPort)?.PublicPort
+
+    if (dbKind) {
+      const port = publicPort ?? DB_DEFAULT_PORT[dbKind] ?? 5432
+      await db.databaseInstance.create({
+        data: {
+          name: name || `${dbKind}-${c.Id.slice(0, 6)}`,
+          kind: dbKind,
+          version: image.split(":")[1]?.split("@")[0] || "latest",
+          status: "external", // imported — Slipway didn't provision it, has no password
+          host: "localhost",
+          port,
+          dockerContainerId: c.Id,
+          username: null,
+          password: null,
+          dbName: null,
+          internalPort: DB_DEFAULT_PORT[dbKind] ?? null,
+        },
+      })
+      result.databases++
+    } else {
+      const base = slugify(name || image.split(":")[0].split("/").pop() || "app")
+      let slug = base
+      let n = 1
+      while (await db.project.findUnique({ where: { slug } })) {
+        slug = `${base}-${++n}`
+      }
+      await db.project.create({
+        data: {
+          name: name || image.split(":")[0].split("/").pop() || "imported-app",
+          slug,
+          source: "image",
+          stack: "dockerfile",
+          stackLabel: `Docker image · ${image}`,
+          framework: "Docker",
+          environment: "production",
+          status: statusFromState(c.State || "stopped"),
+          region: "local",
+          dockerImage: image,
+          dockerContainerId: c.Id,
+          url: publicPort ? `http://localhost:${publicPort}` : null,
+          description: "Imported from an existing container on the host via Scan.",
+        },
+      })
+      result.projects++
+    }
+  }
+
+  // --- volumes ---
+  const volList = await docker.listVolumes()
+  const existingVolNames = new Set(
+    (await db.volume.findMany({ where: { dockerVolumeName: { not: null } }, select: { dockerVolumeName: true } }))
+      .map((v) => v.dockerVolumeName as string)
+  )
+  for (const v of volList.Volumes || []) {
+    const vname = v.Name || ""
+    if (!vname || vname.startsWith("slipway-db-") || existingVolNames.has(vname)) {
+      result.skipped++
+      continue
+    }
+    await db.volume.create({
+      data: {
+        name: vname,
+        dockerVolumeName: vname,
+        sizeGb: 20,
+        usedGb: 0,
+        server: "local",
+      },
+    })
+    result.volumes++
+  }
+
+  await recordActivity("system", `scanned host: imported ${result.projects} app(s), ${result.databases} database(s), ${result.volumes} volume(s)`, { actor })
+  await emit(
+    "system",
+    "system",
+    `host scan imported ${result.projects} app(s), ${result.databases} database(s), ${result.volumes} volume(s)`,
+    {
+      title: "Host scan complete",
+      body: `Imported ${result.projects + result.databases + result.volumes} existing resource(s) (${result.skipped} already managed).`,
+      level: "success",
+      kind: "system",
+    },
+    { actor }
+  )
+  return result
 }
