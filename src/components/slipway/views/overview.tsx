@@ -44,7 +44,7 @@ export function OverviewView() {
   const totalReplicas = projects.reduce((a, p) => a + p.replicas, 0)
   const totalMemory = projects.reduce((a, p) => a + p.memoryMb * p.replicas, 0)
   const monthlyDeploys = projects.reduce((a, p) => a + p.monthlyDeploys, 0)
-  const avgSuccess = Math.round(projects.reduce((a, p) => a + p.successRate, 0) / projects.length * 10) / 10
+  const avgSuccess = projects.length > 0 ? Math.round(projects.reduce((a, p) => a + p.successRate, 0) / projects.length * 10) / 10 : 0
 
   const inFlightDeploy = deployments.find((d) => d.status === 'building' || d.status === 'deploying')
   const p95 = lastV(metrics.p95Latency.data)
