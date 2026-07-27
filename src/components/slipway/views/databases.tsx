@@ -225,7 +225,11 @@ function DatabaseActions({ db }: { db: DatabaseInstance }) {
 
   const [creds, setCreds] = React.useState<{ username?: string; password?: string; dbName?: string; connectionString?: string; note?: string } | null>(null)
   const [editName, setEditName] = React.useState(db.name)
-  const [editProject, setEditProject] = React.useState(db.projectId ?? '')
+  // ponytail: Radix <SelectItem> forbids value="" (it reserves "" to clear the
+  // selection / show the placeholder), so model "no project" as a sentinel and
+  // map it back to null on save.
+  const NONE = '__none__'
+  const [editProject, setEditProject] = React.useState(db.projectId ?? NONE)
   const [editBackups, setEditBackups] = React.useState(db.backupsEnabled)
 
   const showCreds = async () => {
@@ -244,7 +248,7 @@ function DatabaseActions({ db }: { db: DatabaseInstance }) {
     try {
       await updateDatabase(db.id, {
         name: editName,
-        projectId: editProject || null,
+        projectId: editProject === NONE ? null : editProject,
         backupsEnabled: editBackups,
       })
       toast({ title: 'Database updated' })
@@ -281,7 +285,7 @@ function DatabaseActions({ db }: { db: DatabaseInstance }) {
           <DropdownMenuItem onClick={showCreds}>
             <KeyRound size={12} className="mr-2" /> Show credentials
           </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => { setEditName(db.name); setEditProject(db.projectId ?? ''); setEditBackups(db.backupsEnabled); setEditOpen(true) }}>
+          <DropdownMenuItem onClick={() => { setEditName(db.name); setEditProject(db.projectId ?? NONE); setEditBackups(db.backupsEnabled); setEditOpen(true) }}>
             <Pencil size={12} className="mr-2" /> Edit
           </DropdownMenuItem>
           {db.projectId && (
@@ -338,7 +342,7 @@ function DatabaseActions({ db }: { db: DatabaseInstance }) {
               <Select value={editProject} onValueChange={setEditProject}>
                 <SelectTrigger className="h-9 text-[13px]"><SelectValue placeholder="— (shared)" /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="">— (shared)</SelectItem>
+                  <SelectItem value={NONE}>— (shared)</SelectItem>
                   {projects.map((p) => (<SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>))}
                 </SelectContent>
               </Select>
