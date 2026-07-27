@@ -21,6 +21,10 @@ services:
           cpus: "0.5"
           memory: 256m
     environment:
+      NEXTAUTH_SECRET: "slipway-secret-change-in-production-abc123"
+      NEXTAUTH_URL: "https://slipway.skysyaz.my"
+      AUTH_SECRET: "slipway-secret-change-in-production-abc123"
+      AUTH_URL: "https://slipway.skysyaz.my"
       SLIPWAY_ADMIN_USER: admin
       SLIPWAY_ADMIN_PASSWORD: admin
       SLIPWAY_DATA_DIR: /data

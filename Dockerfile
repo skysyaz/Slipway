@@ -22,6 +22,10 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
+ENV NEXTAUTH_SECRET=slipway-secret-change-in-production-abc123
+ENV NEXTAUTH_URL=https://slipway.skysyaz.my
+ENV AUTH_SECRET=slipway-secret-change-in-production-abc123
+ENV AUTH_URL=https://slipway.skysyaz.my
 ENV SLIPWAY_ADMIN_USER=admin
 ENV SLIPWAY_ADMIN_PASSWORD=admin
 ENV SLIPWAY_DATA_DIR=/data

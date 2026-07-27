@@ -15,7 +15,7 @@ import { db } from "./db"
  */
 export const authOptions: NextAuthOptions = {
   session: { strategy: "jwt", maxAge: 60 * 60 * 24 * 7 }, // 7 days
-  secret: process.env.NEXTAUTH_SECRET,
+  secret: process.env.NEXTAUTH_SECRET || process.env.AUTH_SECRET || "slipway-secret-change-in-production-abc123",
   pages: { signIn: "/" }, // custom login view at "/"
   providers: [
     CredentialsProvider({
