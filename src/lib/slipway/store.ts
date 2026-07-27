@@ -1,18 +1,7 @@
 'use client'
 
 import { create } from 'zustand'
-import {
-  projects as seedProjects,
-  deployments as seedDeployments,
-  databases as seedDatabases,
-  volumes as seedVolumes,
-  servers as seedServers,
-  backups as seedBackups,
-  notifications as seedNotifications,
-  activity as seedActivity,
-  nextLogLine,
-  metrics as seedMetrics,
-} from './data'
+import { nextLogLine } from './data'
 import type {
   Project,
   Deployment,
@@ -48,7 +37,7 @@ interface SlipwayState {
   notifications: Notification[]
   activity: ActivityEvent[]
   logs: LogLine[]
-  metrics: typeof seedMetrics
+  metrics: { cpu: number; memory: number; disk: number; network: { in: number; out: number }; uptime: number }
 
   // ui
   newDeploymentOpen: boolean
@@ -78,16 +67,16 @@ export const useSlipway = create<SlipwayState>((set, get) => ({
   env: 'production',
   setEnv: (env) => set({ env }),
 
-  projects: seedProjects,
-  deployments: seedDeployments,
-  databases: seedDatabases,
-  volumes: seedVolumes,
-  servers: seedServers,
-  backups: seedBackups,
-  notifications: seedNotifications,
-  activity: seedActivity,
-  logs: Array.from({ length: 60 }, () => nextLogLine()).reverse(),
-  metrics: seedMetrics,
+  projects: [],
+  deployments: [],
+  databases: [],
+  volumes: [],
+  servers: [],
+  backups: [],
+  notifications: [],
+  activity: [],
+  logs: [],
+  metrics: { cpu: 0, memory: 0, disk: 0, network: { in: 0, out: 0 }, uptime: 0 },
 
   newDeploymentOpen: false,
   setNewDeploymentOpen: (open) => set({ newDeploymentOpen: open }),

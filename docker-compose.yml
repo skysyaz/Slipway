@@ -1,12 +1,19 @@
 services:
   slipway:
-    build: .
+    image: slipway:latest
     deploy:
       restart_policy:
-        condition: any
+        condition: on-failure
         delay: 5s
         max_attempts: 3
       replicas: 1
+      labels:
+        - traefik.enable=true
+        - traefik.docker.network=dokploy-network
+        - traefik.http.routers.slipway.rule=Host(`slipway.skysyaz.my`)
+        - traefik.http.routers.slipway.entrypoints=websecure
+        - traefik.http.routers.slipway.tls.certresolver=letsencrypt
+        - traefik.http.services.slipway.loadbalancer.server.port=3000
       resources:
         limits:
           memory: 2g
@@ -20,8 +27,6 @@ services:
       SLIPWAY_BEHIND_PROXY: "true"
       SLIPWAY_CLUSTER_ID: helix-eu
       TZ: UTC
-    ports:
-      - "8080:3000"
     volumes:
       - slipway-data:/data
       - /var/run/docker.sock:/var/run/docker.sock
@@ -39,4 +44,4 @@ volumes:
 
 networks:
   dokploy-network:
-    external: false
+    external: true
