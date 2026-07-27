@@ -23,7 +23,6 @@ import { useSlipway } from '@/lib/slipway/store'
 import { useAuth } from '@/components/slipway/auth-provider'
 import { CommandPalette } from '@/components/slipway/command-palette'
 import { MobileNav } from '@/components/slipway/mobile-nav'
-import { SlipwayMark } from '@/components/slipway/icons'
 
 function AppShell() {
   const view = useSlipway((s) => s.view)
@@ -69,30 +68,17 @@ function AppShell() {
   )
 }
 
-function LoadingShell() {
-  return (
-    <div className="min-h-screen flex items-center justify-center bg-background">
-      <div className="flex flex-col items-center gap-3">
-        <SlipwayMark size={36} />
-        <div className="text-[13px] text-muted-foreground font-mono">Booting Slipway…</div>
-        <div className="w-32 h-1 rounded-full bg-muted overflow-hidden">
-          <div className="h-full w-1/3 bg-primary animate-pulse" />
-        </div>
-      </div>
-    </div>
-  )
-}
-
 export default function Home() {
-  const { user, loading } = useAuth()
-  // Avoid hydration mismatches: the seed data uses Math.random / Date.now,
-  // so we render a static shell on the server and swap in the live UI after mount.
-  const [mounted, setMounted] = React.useState(false)
-  React.useEffect(() => {
-    setMounted(true)
-  }, [])
+  // useAuth() returns immediately — no loading state.
+  // On the server and initial client render, user is null → LoginView.
+  // After mount, if a session exists in localStorage, user is set → AppShell.
+  // This avoids any "stuck on loading" issue in restricted iframe environments.
+  const { user } = useAuth()
 
-  if (!mounted || loading) return <LoadingShell />
+  // The store data uses Math.random/Date.now, which differ between server
+  // and client. To avoid hydration mismatches, we render LoginView (which is
+  // deterministic) on the server, then let the client take over.
+  // Since LoginView has no random data, SSR and client match perfectly.
   if (!user) return <LoginView />
   return <AppShell />
 }
