@@ -1,0 +1,55 @@
+# =============================================================================
+# Slipway — Caddyfile
+# =============================================================================
+# Caddy automatically provisions and renews TLS certificates via Let's Encrypt
+# for the domain in $SLIPWAY_DOMAIN. No manual cert management required.
+#
+# To use a custom cert, replace the tls line with:
+#   tls /data/certs/fullchain.pem /data/certs/privkey.pem
+# =============================================================================
+
+{
+    # Use Let's Encrypt's production endpoint by default.
+    # For testing, comment the next line and uncomment the one after.
+    email admin@{$SLIPWAY_DOMAIN}
+    # acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
+#{$SLIPWAY_DOMAIN} {
+    encode gzip zstd
+
+    # WebSocket + standard HTTP proxying
+    reverse_proxy slipway:3000 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+        flush_interval -1
+    }
+
+    # Security headers
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "no-referrer-when-downgrade"
+        Permissions-Policy "geolocation=(), microphone=(), camera=()"
+        # Allow the dashboard to be framed by itself only
+        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-ancestors 'self'"
+    }
+
+    # Long-lived log format
+    log {
+        output file /data/access.log {
+            roll_size 100mb
+            roll_keep 10
+            roll_keep_for 720h
+        }
+        format console
+    }
+}
+
+# Redirect www → apex (optional — comment out if you don't use www)
+#www.{$SLIPWAY_DOMAIN} {
+#    redir https://{$SLIPWAY_DOMAIN}{uri} permanent
+#}

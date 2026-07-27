@@ -1,0 +1,73 @@
+# =============================================================================
+# Traefik static configuration
+# =============================================================================
+# Docs: https://doc.traefik.io/traefik/v3.1/
+# =============================================================================
+
+global:
+  checkNewVersion: false
+  sendAnonymousUsage: false
+
+# API + dashboard — protect with basic-auth in production or remove.
+api:
+  dashboard: true
+  insecure: true   # set to false and add a router with auth in production
+
+# Ping endpoint for healthchecks
+ping:
+  entryPoint: traefik
+
+entryPoints:
+  http:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: https
+          scheme: https
+          permanent: true
+  https:
+    address: ":443"
+    http:
+      tls:
+        # Default TLS options applied to all HTTPS routers
+        options: default
+        certResolver: le
+        domains:
+          - main: "${SLIPWAY_DOMAIN}"
+  traefik:
+    address: ":8080"
+
+providers:
+  docker:
+    endpoint: "unix:///var/run/docker.sock"
+    exposedByDefault: false
+    network: slipway-net
+  file:
+    filename: /etc/traefik/dynamic.yml
+    watch: true
+
+# Let's Encrypt ACME — certificates stored in /letsencrypt/acme.json (volume)
+certificatesResolvers:
+  le:
+    acme:
+      email: "${ACME_EMAIL}"
+      storage: /letsencrypt/acme.json
+      # Use the staging endpoint for testing, then switch to production:
+      # caServer: https://acme-staging-v02.api.letsencrypt.org/directory
+      caServer: https://acme-v02.api.letsencrypt.org/directory
+      httpChallenge:
+        entryPoint: http
+
+# Logging
+log:
+  level: INFO
+  format: common
+
+accessLog:
+  format: common
+  filePath: /dev/stdout
+
+# Performance
+serversTransport:
+  maxIdleConnsPerHost: 100

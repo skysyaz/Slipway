@@ -1,0 +1,45 @@
+# =============================================================================
+# Caddy reverse proxy — automatic HTTPS via Let's Encrypt
+# =============================================================================
+# Caddy is the simplest option: it provisions and renews TLS certificates for
+# the domain in SLIPWAY_DOMAIN automatically. No certbot, no manual certs.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.caddy.yml up -d
+#
+# Requirements:
+#   • SLIPWAY_DOMAIN must point at this server's public IP (A record).
+#   • Ports 80 and 443 must be reachable from the internet.
+# =============================================================================
+
+services:
+  slipway:
+    depends_on:
+      - caddy
+
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"   # HTTP/3
+    volumes:
+      - ./proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    environment:
+      SLIPWAY_DOMAIN: ${SLIPWAY_DOMAIN:?SLIPWAY_DOMAIN must be set, e.g. slipway.example.com}
+      SLIPWAY_ADMIN_USER: ${SLIPWAY_ADMIN_USER:-admin}
+    networks:
+      - slipway-net
+    depends_on:
+      - slipway
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  caddy-data:
+  caddy-config:

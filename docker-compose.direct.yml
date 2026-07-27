@@ -1,0 +1,18 @@
+# =============================================================================
+# Direct mode — no reverse proxy
+# =============================================================================
+# Use this for local testing, behind a corporate firewall, or when you already
+# have an external reverse proxy not managed by Slipway.
+#
+# Slipway is exposed on http://<server-ip>:8080 — HTTP only, no TLS.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.direct.yml up -d
+# =============================================================================
+
+services:
+  slipway:
+    ports:
+      - "8080:3000"
+    environment:
+      # No proxy in front — do not trust X-Forwarded-* headers
+      SLIPWAY_BEHIND_PROXY: "false"

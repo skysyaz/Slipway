@@ -18,34 +18,154 @@ Everything the dashboard can do, the CLI can do — and vice versa.
 
 ---
 
-## Quick start (Docker)
+## Quick start (recommended)
 
-The fastest way to run Slipway on your own server.
+Run the interactive installer on your Linux server:
 
 ```bash
-# 1. Get the files
 git clone https://github.com/slipway/slipway.git
 cd slipway
-
-# 2. Configure
-cp .env.example .env
-# Edit .env — at minimum, change SLIPWAY_ADMIN_PASSWORD
-$EDITOR .env
-
-# 3. Launch
-docker compose up -d
-
-# 4. Sign in
-# Open http://<your-server-ip>:8080
-# Username: admin   (or whatever you set in .env)
-# Password: <your-password>
+./install.sh
 ```
 
-That's it. Slipway is now running and ready to deploy your first project.
+The installer walks you through:
 
-> **Production tip:** Put Slipway behind a reverse proxy (Caddy, Traefik, or
-> nginx) for HTTPS termination. Set `SLIPWAY_BEHIND_PROXY=true` in `.env` so
-> Slipway trusts `X-Forwarded-*` headers.
+1. **Pick a reverse proxy** — Caddy / Nginx / Traefik / None
+2. **Set your domain** — e.g. `slipway.example.com`
+3. **Set the admin password** — defaults to `admin`
+
+It writes `.env`, pulls images, and starts Slipway. When it finishes, open
+the URL it prints and sign in with the credentials you set.
+
+> **Default credentials:** `admin` / `admin` — override during install or
+> edit `.env` later.
+
+---
+
+## Choosing a reverse proxy
+
+Slipway ships with three reverse-proxy options. Pick the one that fits your
+setup. All three terminate TLS and proxy to Slipway on the internal Docker
+network.
+
+| Proxy | HTTPS | Best for | Effort |
+|-------|-------|----------|--------|
+| **Caddy** | Automatic (Let's Encrypt) | Most users — zero cert management | Lowest |
+| **Nginx** | Manual (certbot helper) | Existing nginx setups, custom routing | Medium |
+| **Traefik** | Automatic (Let's Encrypt) | Multi-service clusters, label routing | Medium |
+| **None** | None (HTTP on :8080) | Local testing, external proxy already in place | Lowest |
+
+### Option 1 — Caddy (automatic HTTPS, recommended)
+
+Caddy provisions and renews Let's Encrypt certificates automatically. No
+certbot, no cron jobs, no manual cert management.
+
+```bash
+./install.sh
+# → pick "1) Caddy"
+# → enter slipway.example.com
+# → enter your email (for Let's Encrypt)
+# → enter admin password (default: admin)
+```
+
+Or manually:
+
+```bash
+cp .env.example .env
+# In .env, set: SLIPWAY_DOMAIN, ACME_EMAIL, SLIPWAY_ADMIN_PASSWORD
+docker compose -f docker-compose.yml -f docker-compose.caddy.yml up -d
+```
+
+Caddy config is in [`proxy/Caddyfile`](./proxy/Caddyfile). It includes HSTS,
+security headers, WebSocket support, and request logging.
+
+### Option 2 — Nginx (HTTPS via certbot)
+
+Nginx is the most flexible option. By default it serves HTTP on :80 and
+proxies to Slipway. To enable HTTPS, run the bundled certbot helper:
+
+```bash
+./install.sh
+# → pick "2) Nginx"
+# → enter slipway.example.com
+# → enter admin password
+
+# Then provision a cert:
+./proxy/certbot-init.sh slipway.example.com you@email.com
+```
+
+The certbot helper:
+1. Starts nginx in HTTP-only mode
+2. Runs certbot to get a cert into `./proxy/certs/`
+3. Sets `SLIPWAY_ENABLE_TLS=true` in `.env`
+4. Restarts nginx with HTTPS enabled
+5. Prints a cron line for auto-renewal
+
+To use your own cert instead, place `fullchain.pem` and `privkey.pem` in
+`./proxy/certs/`, set `SLIPWAY_ENABLE_TLS=true`, and uncomment the TLS lines
+in [`proxy/nginx.conf`](./proxy/nginx.conf).
+
+Nginx config files: [`proxy/nginx-main.conf`](./proxy/nginx-main.conf) (global)
+and [`proxy/nginx.conf`](./proxy/nginx.conf) (per-site, envsubst'd).
+
+### Option 3 — Traefik (automatic HTTPS, label-based)
+
+Traefik routes based on Docker labels on Slipway's container. ACME certs are
+provisioned automatically and stored in a named volume.
+
+```bash
+./install.sh
+# → pick "3) Traefik"
+# → enter slipway.example.com
+# → enter your email (for Let's Encrypt)
+# → enter admin password
+```
+
+Traefik static config: [`proxy/traefik.yml`](./proxy/traefik.yml).
+Dynamic config (middlewares, TLS options): [`proxy/traefik-dynamic.yml`](./proxy/traefik-dynamic.yml).
+
+The Traefik dashboard is exposed on :8080 — **secure it or remove the port
+mapping in production** (see the comments in `docker-compose.traefik.yml`).
+
+### Option 4 — No proxy (HTTP only)
+
+For local testing or when you already have an external proxy:
+
+```bash
+./install.sh
+# → pick "4) None"
+# → enter admin password
+
+# Or manually:
+docker compose -f docker-compose.yml -f docker-compose.direct.yml up -d
+```
+
+Slipway is exposed on `http://<server-ip>:8080` — HTTP only, no TLS.
+
+---
+
+## Manual setup (no installer)
+
+If you prefer to do everything by hand:
+
+```bash
+# 1. Configure
+cp .env.example .env
+$EDITOR .env   # set SLIPWAY_ADMIN_PASSWORD, SLIPWAY_DOMAIN, ACME_EMAIL
+
+# 2. Pick a proxy and start
+# Caddy:
+docker compose -f docker-compose.yml -f docker-compose.caddy.yml up -d
+
+# Nginx:
+docker compose -f docker-compose.yml -f docker-compose.nginx.yml up -d
+
+# Traefik:
+docker compose -f docker-compose.yml -f docker-compose.traefik.yml up -d
+
+# None (direct, port 8080):
+docker compose -f docker-compose.yml -f docker-compose.direct.yml up -d
+```
 
 ---
 
@@ -54,8 +174,8 @@ That's it. Slipway is now running and ready to deploy your first project.
 - Any modern Linux server (Ubuntu 22.04+, Debian 12+, Rocky 9+, Alpine 3.19+)
 - 1 vCPU · 1 GB RAM · 10 GB disk (minimum)
 - Docker 24+ and Docker Compose v2
-- A public IP if you want to expose apps to the internet
-- (Optional) A domain name pointing at your server for managed SSL
+- A public IP and ports 80 + 443 reachable (for Caddy / Nginx / Traefik)
+- A domain name pointing at your server (for managed SSL)
 
 Slipway itself runs in a single container. The apps you deploy run as separate
 Docker containers on the same host (or on worker nodes you join to the
@@ -63,64 +183,20 @@ cluster).
 
 ---
 
-## Installation options
-
-### Option A — Docker Compose (recommended)
-
-```bash
-docker compose up -d
-```
-
-Pulls the official image from `ghcr.io/slipway/server:1.4.2`, mounts the data
-volume and Docker socket, and starts Slipway on port 8080.
-
-### Option B — Plain Docker
-
-```bash
-docker run -d \
-  --name slipway \
-  --restart unless-stopped \
-  -p 8080:3000 \
-  -v slipway-data:/data \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -e SLIPWAY_ADMIN_USER=admin \
-  -e SLIPWAY_ADMIN_PASSWORD=$(openssl rand -hex 16) \
-  -e SLIPWAY_BEHIND_PROXY=false \
-  ghcr.io/slipway/server:1.4.2
-```
-
-### Option C — Build from source
-
-```bash
-git clone https://github.com/slipway/slipway.git
-cd slipway
-docker compose up -d --build
-```
-
-### Option D — One-line install script (no Docker)
-
-For a bare-metal install on a fresh Linux server:
-
-```bash
-curl -fsSL https://slipway.run/install-server.sh | sh
-```
-
-This installs Slipway as a systemd service. The script works on Ubuntu, Debian,
-Rocky, and Alpine.
-
----
-
 ## Configuration
 
-All configuration is via environment variables. See [`.env.example`](./.env.example)
-for the full list.
+All configuration is via environment variables in [`.env`](./.env.example).
+The most important ones:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SLIPWAY_ADMIN_USER` | `admin` | Admin username |
 | `SLIPWAY_ADMIN_PASSWORD` | `admin` | Admin password — **change this!** |
 | `SLIPWAY_DATA_DIR` | `/data` | Where Slipway stores its SQLite DB, certs, uploads |
-| `SLIPWAY_BEHIND_PROXY` | `false` | Set `true` if behind a reverse proxy |
+| `SLIPWAY_BEHIND_PROXY` | `true` | Set `false` only when using direct mode |
+| `SLIPWAY_DOMAIN` | _(unset)_ | Public hostname — required for Caddy/Nginx/Traefik |
+| `ACME_EMAIL` | _(unset)_ | Email for Let's Encrypt — required for Caddy/Traefik |
+| `SLIPWAY_ENABLE_TLS` | `false` | Nginx-only: set `true` after running certbot-init.sh |
 | `SLIPWAY_CLUSTER_ID` | `helix-eu` | Cluster identifier shown in the UI |
 | `TZ` | `UTC` | Timezone for schedules and logs |
 | `SMTP_URL` | _(unset)_ | SMTP connection string for email notifications |
@@ -128,40 +204,16 @@ for the full list.
 
 ---
 
-## Reverse proxy examples
+## Updating
 
-### Caddy (automatic HTTPS)
-
-```Caddyfile
-slipway.example.com {
-    reverse_proxy slipway:3000
-}
+```bash
+# Pull the latest image and restart
+docker compose -f docker-compose.yml -f docker-compose.<proxy>.yml pull
+docker compose -f docker-compose.yml -f docker-compose.<proxy>.yml up -d
 ```
 
-### nginx
-
-```nginx
-server {
-    listen 443 ssl http2;
-    server_name slipway.example.com;
-
-    ssl_certificate     /etc/ssl/certs/slipway.pem;
-    ssl_certificate_key /etc/ssl/private/slipway.key;
-
-    location / {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-    }
-}
-```
-
-Set `SLIPWAY_BEHIND_PROXY=true` in `.env` and restart Slipway.
+Slipway performs rolling upgrades with zero downtime. Database migrations run
+automatically on boot.
 
 ---
 
@@ -193,36 +245,6 @@ See **CLI & Desktop** in the dashboard for the full cookbook.
 
 ---
 
-## Backups
-
-Slipway backs up its own state and your managed databases / volumes on a
-schedule. Configure destinations under **Settings → Backups** in the dashboard
-or via env vars:
-
-- Local disk (default — stored in `$SLIPWAY_DATA_DIR/backups`)
-- NFS share
-- S3-compatible (AWS S3, Backblaze B2, MinIO, Cloudflare R2)
-
-Restore to any point in time within the retention window via the dashboard or:
-
-```bash
-slipway db restore helix-postgres --pitr "2026-07-25T14:30:00Z"
-```
-
----
-
-## Updating
-
-```bash
-docker compose pull
-docker compose up -d
-```
-
-Slipway performs rolling upgrades with zero downtime. Database migrations run
-automatically on boot.
-
----
-
 ## Architecture
 
 ```
@@ -230,13 +252,16 @@ automatically on boot.
 │                       Your Linux server                         │
 │                                                                 │
 │   ┌─────────────────────────────────────────────────────────┐  │
+│   │   Reverse proxy (Caddy / Nginx / Traefik) :80 :443      │  │
+│   │   • TLS termination  • HTTP/3  • security headers        │  │
+│   └────────────────────────┬────────────────────────────────┘  │
+│                            │                                    │
+│   ┌────────────────────────▼────────────────────────────────┐  │
 │   │                  Slipway container                       │  │
-│   │                                                          │  │
 │   │   ┌────────────┐  ┌────────────┐  ┌──────────────────┐  │  │
 │   │   │ Dashboard  │  │ Build CI   │  │ Scheduler        │  │  │
 │   │   │ (Next.js)  │  │ (Docker)   │  │ (cron + workers) │  │  │
 │   │   └────────────┘  └────────────┘  └──────────────────┘  │  │
-│   │                                                          │  │
 │   │   ┌────────────────────────────────────────────────┐    │  │
 │   │   │  SQLite DB  ·  TLS certs  ·  uploaded artifacts │   │  │
 │   │   └────────────────────────────────────────────────┘    │  │
@@ -259,12 +284,15 @@ Slipway installs Docker on the new node over SSH and joins it to the cluster.
 
 ## Security notes
 
-- **Change the default password.** The container ships with `admin / admin`
-  for first-run convenience. Override `SLIPWAY_ADMIN_PASSWORD` before exposing
-  Slipway to the internet.
-- **Use HTTPS.** Run Slipway behind Caddy/Traefik/nginx with TLS. Slipway
-  provisions and renews Let's Encrypt certs for the apps you deploy, but the
-  Slipway dashboard itself should be secured by your reverse proxy.
+- **Change the default password.** Slipway ships with `admin / admin` for
+  first-run convenience. Override `SLIPWAY_ADMIN_PASSWORD` (in `.env` or via
+  `./install.sh`) before exposing Slipway to the internet.
+- **Use HTTPS.** Caddy and Traefik handle TLS automatically via Let's Encrypt.
+  For Nginx, run `./proxy/certbot-init.sh` after install. Never expose the
+  dashboard over plain HTTP in production.
+- **Close the Traefik dashboard port.** `docker-compose.traefik.yml` exposes
+  Traefik's dashboard on :8080 for convenience. Remove that port mapping or
+  protect it with basic-auth before going live.
 - **Docker socket.** Slipway needs `/var/run/docker.sock` to manage your
   apps. On a single-node install this is normal; on multi-tenant hosts,
   consider running Slipway in its own VM.
@@ -272,6 +300,34 @@ Slipway installs Docker on the new node over SSH and joins it to the cluster.
   single-user session intended for behind-a-proxy deployments. For multi-user
   or hardened setups, swap in NextAuth + Prisma (see
   [docs/advanced/auth.md](docs/advanced/auth.md)).
+
+---
+
+## Troubleshooting
+
+### `SLIPWAY_DOMAIN must be set` error
+
+You picked Caddy/Nginx/Traefik but didn't set `SLIPWAY_DOMAIN` in `.env`.
+Either run `./install.sh` (which sets it for you) or edit `.env` and add:
+```
+SLIPWAY_DOMAIN=slipway.example.com
+```
+
+### HTTPS doesn't work after install
+
+- Make sure DNS for your domain actually points at this server's public IP.
+- Make sure ports 80 and 443 are open in your firewall.
+- For Caddy: `docker compose -f docker-compose.yml -f docker-compose.caddy.yml logs caddy` — Caddy logs ACME failures.
+- For Traefik: `docker compose -f docker-compose.yml -f docker-compose.traefik.yml logs traefik` — look for ACME errors.
+- For Nginx: run `./proxy/certbot-init.sh <domain> <email>` to provision a cert.
+
+### Want to switch proxies later
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.<old>.yml down
+# edit .env if needed, then:
+docker compose -f docker-compose.yml -f docker-compose.<new>.yml up -d
+```
 
 ---
 

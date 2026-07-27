@@ -1,0 +1,50 @@
+# =============================================================================
+# Nginx reverse proxy — HTTPS-ready
+# =============================================================================
+# Nginx is the most flexible option. By default this config serves HTTP on :80
+# and proxies to Slipway. To enable HTTPS, either:
+#
+#   A) Bring your own cert (fastest):
+#        • Put your fullchain.pem and privkey.pem in ./proxy/certs/
+#        • Set SLIPWAY_ENABLE_TLS=true in .env
+#        • docker compose -f docker-compose.yml -f docker-compose.nginx.yml up -d
+#
+#   B) Use certbot (recommended for production):
+#        • Run the helper script:  ./proxy/certbot-init.sh slipway.example.com
+#        • It gets the cert, then restarts nginx with TLS enabled
+#
+#   docker compose -f docker-compose.yml -f docker-compose.nginx.yml up -d
+# =============================================================================
+
+services:
+  slipway:
+    depends_on:
+      - nginx
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./proxy/nginx.conf:/etc/nginx/conf.d/slipway.conf.template:ro
+      - ./proxy/nginx-main.conf:/etc/nginx/nginx.conf:ro
+      - ./proxy/certs:/etc/nginx/certs:ro
+      - nginx-logs:/var/log/nginx
+    environment:
+      SLIPWAY_DOMAIN: ${SLIPWAY_DOMAIN:?SLIPWAY_DOMAIN must be set, e.g. slipway.example.com}
+      SLIPWAY_ENABLE_TLS: ${SLIPWAY_ENABLE_TLS:-false}
+    command: /bin/sh -c "envsubst '$$SLIPWAY_DOMAIN $$SLIPWAY_ENABLE_TLS' < /etc/nginx/conf.d/slipway.conf.template > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"
+    networks:
+      - slipway-net
+    depends_on:
+      - slipway
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:80/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  nginx-logs:
