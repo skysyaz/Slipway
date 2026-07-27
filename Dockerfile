@@ -44,7 +44,13 @@ COPY --from=builder /app/.next/standalone/.next ./.next
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/src/lib/db.ts ./src/lib/db.ts
-COPY --from=builder /app/node_modules/bcryptjs ./node_modules/bcryptjs
+# ponytail: Bun's node_modules layout breaks Next's output-file-tracing, which
+# omits next-auth/otplib/qrcode (and their deps) from standalone — every
+# /api/auth/* route then fails to load and 404s, so login is impossible.
+# Overlay the full builder node_modules to end the whack-a-mole (the previous
+# bcryptjs-only copy was the same bug). Same alpine-musl base, so native addons
+# stay compatible. Upgrade path: build with npm ci so nft traces correctly.
+COPY --from=builder /app/node_modules ./node_modules
 
 RUN mkdir -p /data
 
