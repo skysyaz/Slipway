@@ -97,7 +97,7 @@ export function DatabasesView() {
                     {db.kind} {db.version} · {db.host}:{db.port}
                   </div>
                 </div>
-                <Button variant="ghost" size="sm" className="h-7 w-7 p-0">
+                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => toast({ title: 'Database actions', description: `Edit/delete/inspect ${db.name}.` })}>
                   <MoreHorizontal size={13} />
                 </Button>
               </div>

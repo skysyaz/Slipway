@@ -69,7 +69,7 @@ export function BackupsView() {
                   <span className="font-mono">{s.schedule}</span> · keep {s.retention} · <span className="font-mono">{s.target}</span>
                 </div>
               </div>
-              <Button variant="ghost" size="sm" className="h-7 w-7 p-0">
+              <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => toast({ title: 'Schedule actions', description: `Edit/delete schedule for ${s.name}.` })}>
                 <MoreHorizontal size={12} />
               </Button>
             </div>

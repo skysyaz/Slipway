@@ -185,7 +185,7 @@ function InstallSection({ activeOs, setActiveOs }: { activeOs: 'macos' | 'linux'
                 </div>
                 <div className="text-[11px] text-muted-foreground">{d.detail}</div>
                 <div className="text-[11px] text-muted-foreground font-mono mt-1">{d.file} · {d.size}</div>
-                <Button variant="outline" size="sm" className="mt-3 h-8 w-full gap-2">
+                <Button variant="outline" size="sm" className="mt-3 h-8 w-full gap-2" onClick={() => toast({ title: 'Download started', description: `${d.file} (${d.size}) downloading.` })}>
                   <Download size={11} />
                   Download
                 </Button>

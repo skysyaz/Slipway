@@ -102,7 +102,7 @@ export function StorageView() {
                 <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Backup" onClick={() => toast({ title: 'Backup started', description: `${v.name} backup is running.` })}>
                   <Archive size={12} />
                 </Button>
-                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="More">
+                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="More" onClick={() => toast({ title: 'Volume actions', description: `Edit/resize/delete ${v.name}.` })}>
                   <MoreHorizontal size={12} />
                 </Button>
               </div>

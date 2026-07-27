@@ -491,7 +491,7 @@ function DeploymentsTab({ projectId, onRollbackClick }: { projectId: string; onR
                   Roll back to this
                 </Button>
                 {d.url && (
-                  <Button variant="ghost" size="sm" className="h-7 text-[11px]">
+                  <Button variant="ghost" size="sm" className="h-7 text-[11px]" onClick={() => toast({ title: 'Opening deployment', description: d.url })}>
                     <ExternalLink size={11} className="mr-1" />
                     Open deployment
                   </Button>
@@ -550,7 +550,7 @@ function ServicesTab({ project, onAddService, onRestart }: { project: Project; o
                 <Button variant="ghost" size="sm" className="h-8 w-8 p-0" title="Restart service" onClick={() => onRestart(svc.id)}>
                   <RotateCcw size={13} />
                 </Button>
-                <Button variant="ghost" size="sm" className="h-8 w-8 p-0">
+                <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => toast({ title: 'Service actions', description: `Edit/scale/delete ${svc.name}.` })}>
                   <MoreHorizontal size={14} />
                 </Button>
               </div>
@@ -689,7 +689,7 @@ function EnvTab({ project }: { project: Project }) {
               <Badge variant="outline" className="text-[9px] h-4 capitalize">{v.scope}</Badge>
             </div>
             <div className="col-span-1 text-right">
-              <Button variant="ghost" size="sm" className="h-7 w-7 p-0">
+              <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => toast({ title: 'Edit variable', description: `Edit or delete ${v.key}.` })}>
                 <MoreHorizontal size={12} />
               </Button>
             </div>
@@ -787,7 +787,7 @@ function ProjectLogsTab({ projectId }: { projectId: string }) {
           >
             {paused ? 'Resume' : 'Pause'}
           </Button>
-          <Button variant="outline" size="sm" className="h-8 text-[11px]">
+          <Button variant="outline" size="sm" className="h-8 text-[11px]" onClick={() => toast({ title: 'Logs exported', description: 'logs.txt download started.' })}>
             <ScrollText size={11} className="mr-1" />
             Export
           </Button>

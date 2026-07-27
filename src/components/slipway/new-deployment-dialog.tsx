@@ -536,7 +536,7 @@ function ConfigureStep(props: any) {
             placeholder="my-app.slipway.app"
             className="font-mono text-[13px]"
           />
-          <Button variant="outline" size="sm" className="h-9 shrink-0">
+          <Button variant="outline" size="sm" className="h-9 shrink-0" onClick={() => props.setDomain(`${props.source === 'compose' ? 'crm' : props.source === 'folder' ? 'status' : 'helix-web'}.slipway.app`)}>
             <GitBranch size={13} className="mr-1.5" />
             Use default
           </Button>

@@ -132,7 +132,7 @@ function ClusterSettings({ servers, onAddServer }: { servers: any[]; onAddServer
                     <span className="font-mono">{s.diskUsedGb}/{s.diskGb} GB</span>
                   </div>
                 </div>
-                <Button variant="ghost" size="sm" className="h-8 text-[11px]">
+                <Button variant="ghost" size="sm" className="h-8 text-[11px]" onClick={() => toast({ title: 'Opening shell', description: `SSH shell into ${s.name}.` })}>
                   <Terminal size={11} className="mr-1" />
                   Shell
                 </Button>
@@ -328,7 +328,7 @@ function SecuritySettings({ onAddSshKey }: { onAddSshKey: () => void }) {
                   {k.fp} · scope: {k.scope} · added {k.created}
                 </div>
               </div>
-              <Button variant="ghost" size="sm" className="h-7 w-7 p-0">
+              <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => { navigator.clipboard?.writeText(k.fp); toast({ title: 'Fingerprint copied' }) }}>
                 <Copy size={11} />
               </Button>
             </div>

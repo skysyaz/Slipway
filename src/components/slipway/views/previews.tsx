@@ -7,12 +7,14 @@ import { Badge } from '@/components/ui/badge'
 import { useSlipway } from '@/lib/slipway/store'
 import { StackGlyph, StatusDot } from '../icons'
 import { TimeAgo } from '../format'
+import { useToast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
 
 export function PreviewsView() {
   const projects = useSlipway((s) => s.projects)
   const selectProject = useSlipway((s) => s.selectProject)
   const setNewPreviewOpen = useSlipway((s) => s.setNewPreviewOpen)
+  const { toast } = useToast()
 
   const previews = projects.filter((p) => p.environment === 'preview')
   const stagingProjects = projects.filter((p) => p.environment === 'staging')
@@ -146,7 +148,7 @@ export function PreviewsView() {
       <div className="rounded-xl border border-border bg-card p-4">
         <div className="flex items-center justify-between mb-2">
           <div className="text-[13px] font-semibold">Auto-cleanup policy</div>
-          <Button variant="outline" size="sm" className="h-7 text-[11px]">Edit</Button>
+          <Button variant="outline" size="sm" className="h-7 text-[11px]" onClick={() => toast({ title: 'Edit cleanup policy', description: 'Cleanup policy editor would open here.' })}>Edit</Button>
         </div>
         <div className="space-y-2">
           {[
