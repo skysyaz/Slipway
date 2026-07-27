@@ -37,6 +37,11 @@ import { cn } from '@/lib/utils'
 
 export function SettingsView() {
   const servers = useSlipway((s) => s.servers)
+  const setNewServerOpen = useSlipway((s) => s.setNewServerOpen)
+  const setNewSshKeyOpen = useSlipway((s) => s.setNewSshKeyOpen)
+  const setNewRegistryOpen = useSlipway((s) => s.setNewRegistryOpen)
+  const setNewWebhookOpen = useSlipway((s) => s.setNewWebhookOpen)
+  const setNewTokenOpen = useSlipway((s) => s.setNewTokenOpen)
   const [tab, setTab] = React.useState<'cluster' | 'registries' | 'integrations' | 'security' | 'profile'>('cluster')
 
   return (
@@ -74,23 +79,23 @@ export function SettingsView() {
         ))}
       </div>
 
-      {tab === 'cluster' && <ClusterSettings servers={servers} />}
-      {tab === 'registries' && <RegistriesSettings />}
-      {tab === 'integrations' && <IntegrationsSettings />}
-      {tab === 'security' && <SecuritySettings />}
-      {tab === 'profile' && <ProfileSettings />}
+      {tab === 'cluster' && <ClusterSettings servers={servers} onAddServer={() => setNewServerOpen(true)} />}
+      {tab === 'registries' && <RegistriesSettings onAddRegistry={() => setNewRegistryOpen(true)} />}
+      {tab === 'integrations' && <IntegrationsSettings onAddWebhook={() => setNewWebhookOpen(true)} />}
+      {tab === 'security' && <SecuritySettings onAddSshKey={() => setNewSshKeyOpen(true)} />}
+      {tab === 'profile' && <ProfileSettings onNewToken={() => setNewTokenOpen(true)} />}
     </div>
   )
 }
 
-function ClusterSettings({ servers }: { servers: any[] }) {
+function ClusterSettings({ servers, onAddServer }: { servers: any[]; onAddServer: () => void }) {
   return (
     <div className="space-y-4">
       <SettingsCard
         title="Cluster"
         description="Your Slipway cluster spans one or more Linux servers. Add workers to scale horizontally."
         action={
-          <Button size="sm" className="h-8 gap-2">
+          <Button size="sm" className="h-8 gap-2" onClick={onAddServer}>
             <Plus size={12} />
             Add server
           </Button>
@@ -156,7 +161,7 @@ function ClusterSettings({ servers }: { servers: any[] }) {
           </div>
         </div>
         <div className="flex justify-end mt-3">
-          <Button size="sm" className="h-8">Connect server</Button>
+          <Button size="sm" className="h-8" onClick={onAddServer}>Connect server</Button>
         </div>
       </SettingsCard>
 
@@ -170,7 +175,7 @@ function ClusterSettings({ servers }: { servers: any[] }) {
   )
 }
 
-function RegistriesSettings() {
+function RegistriesSettings({ onAddRegistry }: { onAddRegistry: () => void }) {
   const { toast } = useToast()
   const registries = [
     { name: 'ghcr.io', url: 'ghcr.io', auth: 'token', scopes: 'helixco/*, slipway/*', default: true },
@@ -181,7 +186,7 @@ function RegistriesSettings() {
     <SettingsCard
       title="Container registries"
       description="Where Slipway pulls base images and pushes built images. Supports Docker Hub, GHCR, Gitea, Harbor, and any OCI-compliant registry."
-      action={<Button size="sm" className="h-8 gap-2"><Plus size={12} />Add registry</Button>}
+      action={<Button size="sm" className="h-8 gap-2" onClick={onAddRegistry}><Plus size={12} />Add registry</Button>}
     >
       <div className="space-y-2">
         {registries.map((r) => (
@@ -206,7 +211,8 @@ function RegistriesSettings() {
   )
 }
 
-function IntegrationsSettings() {
+function IntegrationsSettings({ onAddWebhook }: { onAddWebhook: () => void }) {
+  const { toast } = useToast()
   return (
     <div className="space-y-4">
       <SettingsCard title="Notifications" description="Where Slipway sends deploy, backup, and alert events.">
@@ -234,7 +240,7 @@ function IntegrationsSettings() {
                     Connected
                   </Badge>
                 ) : (
-                  <Button size="sm" variant="outline" className="h-7 text-[11px]">Connect</Button>
+                  <Button size="sm" variant="outline" className="h-7 text-[11px]" onClick={() => toast({ title: `${i.name} connect`, description: `${i.name} integration setup would open here.` })}>Connect</Button>
                 )}
               </div>
             )
@@ -242,7 +248,7 @@ function IntegrationsSettings() {
         </div>
       </SettingsCard>
 
-      <SettingsCard title="Webhooks" description="Outbound webhooks for arbitrary integrations. Slipway POSTs JSON on each event." action={<Button size="sm" className="h-8 gap-2"><Plus size={12} />Add webhook</Button>}>
+      <SettingsCard title="Webhooks" description="Outbound webhooks for arbitrary integrations. Slipway POSTs JSON on each event." action={<Button size="sm" className="h-8 gap-2" onClick={onAddWebhook}><Plus size={12} />Add webhook</Button>}>
         <div className="space-y-2">
           {[
             { url: 'https://api.helix.co/hooks/slipway', events: ['deploy.success', 'deploy.failed', 'rollback'], status: 'active' },
@@ -283,7 +289,7 @@ function IntegrationsSettings() {
                   Connected
                 </Badge>
               ) : (
-                <Button size="sm" variant="outline" className="h-7 text-[11px]">Connect</Button>
+                <Button size="sm" variant="outline" className="h-7 text-[11px]" onClick={() => toast({ title: `${p.name} connect`, description: `${p.name} OAuth setup would open here.` })}>Connect</Button>
               )}
             </div>
           ))}
@@ -293,7 +299,7 @@ function IntegrationsSettings() {
   )
 }
 
-function SecuritySettings() {
+function SecuritySettings({ onAddSshKey }: { onAddSshKey: () => void }) {
   return (
     <div className="space-y-4">
       <SettingsCard title="Authentication" description="How users authenticate to Slipway.">
@@ -307,7 +313,7 @@ function SecuritySettings() {
         </div>
       </SettingsCard>
 
-      <SettingsCard title="SSH keys" description="SSH keys Slipway uses to connect to your servers and clone private repositories." action={<Button size="sm" className="h-8 gap-2"><Plus size={12} />Add key</Button>}>
+      <SettingsCard title="SSH keys" description="SSH keys Slipway uses to connect to your servers and clone private repositories." action={<Button size="sm" className="h-8 gap-2" onClick={onAddSshKey}><Plus size={12} />Add key</Button>}>
         <div className="space-y-2">
           {[
             { name: 'helix-prod-key', fp: 'SHA256:abC9...xY2k', created: '2024-08-12', scope: 'cluster' },
@@ -378,7 +384,7 @@ function SecuritySettings() {
   )
 }
 
-function ProfileSettings() {
+function ProfileSettings({ onNewToken }: { onNewToken: () => void }) {
   const { toast } = useToast()
   return (
     <div className="space-y-4">
@@ -414,7 +420,7 @@ function ProfileSettings() {
         </div>
       </SettingsCard>
 
-      <SettingsCard title="API tokens" description="Use tokens to authenticate the Slipway CLI and automation." action={<Button size="sm" className="h-8 gap-2"><Plus size={12} />New token</Button>}>
+      <SettingsCard title="API tokens" description="Use tokens to authenticate the Slipway CLI and automation." action={<Button size="sm" className="h-8 gap-2" onClick={onNewToken}><Plus size={12} />New token</Button>}>
         <div className="space-y-2">
           {[
             { name: 'laptop-cli', scope: 'read, deploy', created: '2026-05-12', lastUsed: '4h ago' },
@@ -453,11 +459,11 @@ function ProfileSettings() {
           ))}
         </div>
         <div className="mt-3 flex items-center gap-2 flex-wrap">
-          <Button variant="outline" size="sm" className="h-8 text-[11px] gap-2">
+          <Button variant="outline" size="sm" className="h-8 text-[11px] gap-2" onClick={() => toast({ title: 'Configuration exported', description: 'slipway-config.json downloaded.' })}>
             <Download size={11} />
             Export configuration
           </Button>
-          <Button variant="outline" size="sm" className="h-8 text-[11px] gap-2">
+          <Button variant="outline" size="sm" className="h-8 text-[11px] gap-2" onClick={() => toast({ title: 'Checking for updates…', description: 'Slipway 1.4.3 available. Upgrade in maintenance window.' })}>
             <RefreshCw size={11} />
             Check for updates
           </Button>

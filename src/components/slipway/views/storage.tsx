@@ -1,18 +1,21 @@
 'use client'
 
 import * as React from 'react'
-import { HardDrive, Plus, Search, Server, Lock, MoreHorizontal, Download, RotateCcw } from 'lucide-react'
+import { HardDrive, Plus, Search, Server, Lock, MoreHorizontal, Download, RotateCcw, Archive } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
 import { useSlipway } from '@/lib/slipway/store'
 import { BytesShort } from '../format'
+import { useToast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
 
 export function StorageView() {
   const volumes = useSlipway((s) => s.volumes)
   const projects = useSlipway((s) => s.projects)
+  const setNewVolumeOpen = useSlipway((s) => s.setNewVolumeOpen)
+  const { toast } = useToast()
   const [query, setQuery] = React.useState('')
 
   const filtered = volumes.filter((v) => !query || v.name.includes(query) || v.server.includes(query))
@@ -30,7 +33,7 @@ export function StorageView() {
             {volumes.filter((v) => v.encrypted).length} encrypted
           </p>
         </div>
-        <Button size="sm" className="h-9 gap-2">
+        <Button size="sm" className="h-9 gap-2" onClick={() => setNewVolumeOpen(true)}>
           <Plus size={13} />
           New volume
         </Button>
@@ -93,8 +96,11 @@ export function StorageView() {
                 <Badge variant="outline" className="text-[9px] uppercase">{v.type}</Badge>
               </div>
               <div className="col-span-1 flex items-center justify-end gap-0.5">
-                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Download snapshot">
+                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Download snapshot" onClick={() => toast({ title: 'Snapshot queued', description: `${v.name} snapshot is being prepared.` })}>
                   <Download size={12} />
+                </Button>
+                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Backup" onClick={() => toast({ title: 'Backup started', description: `${v.name} backup is running.` })}>
+                  <Archive size={12} />
                 </Button>
                 <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="More">
                   <MoreHorizontal size={12} />

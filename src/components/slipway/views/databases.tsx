@@ -28,6 +28,10 @@ import { cn } from '@/lib/utils'
 export function DatabasesView() {
   const databases = useSlipway((s) => s.databases)
   const projects = useSlipway((s) => s.projects)
+  const setNewDatabaseOpen = useSlipway((s) => s.setNewDatabaseOpen)
+  const restartService = useSlipway((s) => s.restartService)
+  const runBackup = useSlipway((s) => s.runBackup)
+  const selectProject = useSlipway((s) => s.selectProject)
   const [query, setQuery] = React.useState('')
 
   const filtered = databases.filter((d) => !query || d.name.includes(query) || d.kind.includes(query))
@@ -47,11 +51,11 @@ export function DatabasesView() {
           </p>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" size="sm" className="h-9 gap-2">
+          <Button variant="outline" size="sm" className="h-9 gap-2" onClick={() => setNewDatabaseOpen(true)}>
             <Boxes size={13} />
             Import compose DB
           </Button>
-          <Button size="sm" className="h-9 gap-2">
+          <Button size="sm" className="h-9 gap-2" onClick={() => setNewDatabaseOpen(true)}>
             <Plus size={13} />
             New database
           </Button>
@@ -144,11 +148,11 @@ export function DatabasesView() {
                 </div>
                 <div className="flex items-center gap-1">
                   <CopyButton text={`postgres://••••@${db.host}:${db.port}/${db.name}`} />
-                  <Button variant="outline" size="sm" className="h-7 text-[11px]">
+                  <Button variant="outline" size="sm" className="h-7 text-[11px]" onClick={() => restartService('prj-api', db.id)}>
                     <RotateCcw size={10} className="mr-1" />
                     Restart
                   </Button>
-                  <Button variant="outline" size="sm" className="h-7 text-[11px]">
+                  <Button variant="outline" size="sm" className="h-7 text-[11px]" onClick={() => runBackup(db.name, 'database')}>
                     <Archive size={10} className="mr-1" />
                     Backup
                   </Button>

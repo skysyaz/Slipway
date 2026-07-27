@@ -5,6 +5,7 @@ import { Sidebar } from '@/components/slipway/sidebar'
 import { Topbar } from '@/components/slipway/topbar'
 import { NewDeploymentDialog } from '@/components/slipway/new-deployment-dialog'
 import { RollbackDialog } from '@/components/slipway/rollback-dialog'
+import { AllDialogs, AddServiceDialog } from '@/components/slipway/action-dialogs'
 import { OverviewView } from '@/components/slipway/views/overview'
 import { ProjectsView } from '@/components/slipway/views/projects'
 import { ProjectDetailView } from '@/components/slipway/views/project-detail'
@@ -26,6 +27,7 @@ import { MobileNav } from '@/components/slipway/mobile-nav'
 
 function AppShell() {
   const view = useSlipway((s) => s.view)
+  const selectedProjectId = useSlipway((s) => s.selectedProjectId)
 
   return (
     <div className="min-h-screen flex bg-background">
@@ -63,6 +65,8 @@ function AppShell() {
       </div>
       <NewDeploymentDialog />
       <RollbackDialog />
+      {selectedProjectId && <AddServiceDialog projectId={selectedProjectId} />}
+      <AllDialogs />
       <CommandPalette />
     </div>
   )

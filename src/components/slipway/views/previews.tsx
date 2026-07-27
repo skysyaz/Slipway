@@ -12,6 +12,7 @@ import { cn } from '@/lib/utils'
 export function PreviewsView() {
   const projects = useSlipway((s) => s.projects)
   const selectProject = useSlipway((s) => s.selectProject)
+  const setNewPreviewOpen = useSlipway((s) => s.setNewPreviewOpen)
 
   const previews = projects.filter((p) => p.environment === 'preview')
   const stagingProjects = projects.filter((p) => p.environment === 'staging')
@@ -25,7 +26,7 @@ export function PreviewsView() {
             {previews.length} active previews · {stagingProjects.length} staging environments · auto-cleanup after PR close
           </p>
         </div>
-        <Button size="sm" className="h-9 gap-2">
+        <Button size="sm" className="h-9 gap-2" onClick={() => setNewPreviewOpen(true)}>
           <Plus size={13} />
           New preview
         </Button>

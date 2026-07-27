@@ -52,6 +52,10 @@ export function ProjectDetailView() {
   const setNewDeploymentOpen = useSlipway((s) => s.setNewDeploymentOpen)
   const triggerDeployment = useSlipway((s) => s.triggerDeployment)
   const setRollbackTarget = useSlipway((s) => s.setRollbackTarget)
+  const setNewDomainOpen = useSlipway((s) => s.setNewDomainOpen)
+  const setAddServiceOpen = useSlipway((s) => s.setAddServiceOpen)
+  const setNewBackupOpen = useSlipway((s) => s.setNewBackupOpen)
+  const restartService = useSlipway((s) => s.restartService)
   const [tab, setTab] = React.useState('overview')
 
   if (!project) {
@@ -173,10 +177,10 @@ export function ProjectDetailView() {
           <DeploymentsTab projectId={project.id} onRollbackClick={(d) => setRollbackTarget(d)} />
         </TabsContent>
         <TabsContent value="services" className="mt-5">
-          <ServicesTab project={project} />
+          <ServicesTab project={project} onAddService={() => setAddServiceOpen(true)} onRestart={(serviceId) => restartService(project.id, serviceId)} />
         </TabsContent>
         <TabsContent value="domains" className="mt-5">
-          <DomainsTab project={project} />
+          <DomainsTab project={project} onAddDomain={() => setNewDomainOpen(true)} />
         </TabsContent>
         <TabsContent value="env" className="mt-5">
           <EnvTab project={project} />
@@ -188,7 +192,7 @@ export function ProjectDetailView() {
           <MetricsTab project={project} />
         </TabsContent>
         <TabsContent value="backups" className="mt-5">
-          <ProjectBackupsTab project={project} />
+          <ProjectBackupsTab project={project} onRunBackup={() => setNewBackupOpen(true)} />
         </TabsContent>
         <TabsContent value="settings" className="mt-5">
           <SettingsTab project={project} />
@@ -501,7 +505,7 @@ function DeploymentsTab({ projectId, onRollbackClick }: { projectId: string; onR
   )
 }
 
-function ServicesTab({ project }: { project: Project }) {
+function ServicesTab({ project, onAddService, onRestart }: { project: Project; onAddService: () => void; onRestart: (serviceId?: string) => void }) {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
@@ -511,7 +515,7 @@ function ServicesTab({ project }: { project: Project }) {
             {project.services.length} services defined in this project. Each can be scaled, restarted, or inspected independently.
           </p>
         </div>
-        <Button variant="outline" size="sm" className="h-9 gap-2">
+        <Button variant="outline" size="sm" className="h-9 gap-2" onClick={onAddService}>
           <Plus size={13} />
           Add service
         </Button>
@@ -543,6 +547,9 @@ function ServicesTab({ project }: { project: Project }) {
                 <div className="text-[11px] text-muted-foreground font-mono mt-1 truncate">{svc.image}</div>
               </div>
               <div className="flex items-center gap-1 shrink-0">
+                <Button variant="ghost" size="sm" className="h-8 w-8 p-0" title="Restart service" onClick={() => onRestart(svc.id)}>
+                  <RotateCcw size={13} />
+                </Button>
                 <Button variant="ghost" size="sm" className="h-8 w-8 p-0">
                   <MoreHorizontal size={14} />
                 </Button>
@@ -577,7 +584,7 @@ function ServicesTab({ project }: { project: Project }) {
   )
 }
 
-function DomainsTab({ project }: { project: Project }) {
+function DomainsTab({ project, onAddDomain }: { project: Project; onAddDomain: () => void }) {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
@@ -587,7 +594,7 @@ function DomainsTab({ project }: { project: Project }) {
             Slipway provisions TLS certificates via Let’s Encrypt and renews them automatically. Add custom domains or route preview branches.
           </p>
         </div>
-        <Button variant="outline" size="sm" className="h-9 gap-2">
+        <Button variant="outline" size="sm" className="h-9 gap-2" onClick={onAddDomain}>
           <Plus size={13} />
           Add domain
         </Button>
@@ -652,7 +659,7 @@ function EnvTab({ project }: { project: Project }) {
             Encrypted at rest. Variables can be scoped to environments (production, staging, preview). Changes trigger a rolling restart.
           </p>
         </div>
-        <Button variant="outline" size="sm" className="h-9 gap-2">
+        <Button variant="outline" size="sm" className="h-9 gap-2" onClick={() => toast({ title: 'Pull from .env', description: 'Upload a .env file dialog would open here.' })}>
           <KeyRound size={13} />
           Pull from .env
         </Button>
@@ -845,7 +852,7 @@ function MetricsTab({ project }: { project: Project }) {
   )
 }
 
-function ProjectBackupsTab({ project }: { project: Project }) {
+function ProjectBackupsTab({ project, onRunBackup }: { project: Project; onRunBackup: () => void }) {
   const allBackups = useSlipway((s) => s.backups)
   const backups = React.useMemo(
     () => allBackups.filter((b) => b.target.includes(project.slug) || b.targetKind === 'project'),
@@ -860,7 +867,7 @@ function ProjectBackupsTab({ project }: { project: Project }) {
             Snapshots of attached databases and volumes. Restore to any point in time within retention.
           </p>
         </div>
-        <Button variant="outline" size="sm" className="h-9 gap-2">
+        <Button variant="outline" size="sm" className="h-9 gap-2" onClick={onRunBackup}>
           <Archive size={13} />
           Run backup now
         </Button>
@@ -970,17 +977,20 @@ function SettingsTab({ project }: { project: Project }) {
             title="Pause this project"
             description="Stop all services. Deploys and backups are suspended."
             buttonLabel="Pause"
+            onConfirm={() => toast({ title: 'Project paused', description: `${project.name} services stopped.`, variant: 'destructive' })}
           />
           <DangerRow
             title="Disconnect source"
             description="Remove the connected repository or folder. Existing services keep running."
             buttonLabel="Disconnect"
+            onConfirm={() => toast({ title: 'Source disconnected', description: `Repository removed from ${project.name}.` })}
           />
           <DangerRow
             title="Delete project"
             description="Permanently delete the project, its services, domains, and history. Backups are retained per policy."
             buttonLabel="Delete"
             destructive
+            onConfirm={() => toast({ title: 'Project deleted', description: `${project.name} and all its resources removed.`, variant: 'destructive' })}
           />
         </div>
       </SettingsCard>
@@ -1012,7 +1022,7 @@ function ToggleRow({ label, description, defaultChecked }: { label: string; desc
   )
 }
 
-function DangerRow({ title, description, buttonLabel, destructive }: { title: string; description: string; buttonLabel: string; destructive?: boolean }) {
+function DangerRow({ title, description, buttonLabel, destructive, onConfirm }: { title: string; description: string; buttonLabel: string; destructive?: boolean; onConfirm?: () => void }) {
   return (
     <div className="flex items-start justify-between gap-3 py-2 border-b border-border last:border-b-0">
       <div className="flex-1">
@@ -1023,6 +1033,7 @@ function DangerRow({ title, description, buttonLabel, destructive }: { title: st
         variant={destructive ? 'destructive' : 'outline'}
         size="sm"
         className="h-8"
+        onClick={onConfirm}
       >
         {buttonLabel}
       </Button>

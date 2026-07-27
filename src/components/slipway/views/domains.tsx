@@ -7,11 +7,14 @@ import { Badge } from '@/components/ui/badge'
 import { useSlipway } from '@/lib/slipway/store'
 import { StatusDot, StackGlyph } from '../icons'
 import { TimeAgo } from '../format'
+import { useToast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
 
 export function DomainsView() {
   const projects = useSlipway((s) => s.projects)
   const selectProject = useSlipway((s) => s.selectProject)
+  const setNewDomainOpen = useSlipway((s) => s.setNewDomainOpen)
+  const { toast } = useToast()
 
   const allDomains = projects.flatMap((p) => p.domains.map((d) => ({ ...d, project: p })))
 
@@ -31,7 +34,7 @@ export function DomainsView() {
             {expiringSoon.length} renewing within 30 days
           </p>
         </div>
-        <Button size="sm" className="h-9 gap-2">
+        <Button size="sm" className="h-9 gap-2" onClick={() => setNewDomainOpen(true)}>
           <Plus size={13} />
           Add domain
         </Button>
@@ -49,7 +52,7 @@ export function DomainsView() {
             Bring your own cert by uploading it under <span className="font-mono text-[11px]">Settings → SSL</span>.
           </p>
         </div>
-        <Button variant="outline" size="sm" className="h-8 shrink-0">
+        <Button variant="outline" size="sm" className="h-8 shrink-0" onClick={() => toast({ title: 'SSL renewal queued', description: 'Renewing all certificates due within 30 days.' })}>
           <RefreshCw size={11} className="mr-1" />
           Renew all
         </Button>

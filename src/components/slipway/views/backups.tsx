@@ -7,10 +7,14 @@ import { Badge } from '@/components/ui/badge'
 import { useSlipway } from '@/lib/slipway/store'
 import { StatusDot, DbGlyph } from '../icons'
 import { TimeAgo, Duration, BytesShort } from '../format'
+import { useToast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
 
 export function BackupsView() {
   const backups = useSlipway((s) => s.backups)
+  const setNewBackupOpen = useSlipway((s) => s.setNewBackupOpen)
+  const setNewBackupScheduleOpen = useSlipway((s) => s.setNewBackupScheduleOpen)
+  const { toast } = useToast()
 
   const stats = {
     total: backups.length,
@@ -32,7 +36,7 @@ export function BackupsView() {
             <BytesShort gb={totalSize / 1024} /> stored
           </p>
         </div>
-        <Button size="sm" className="h-9 gap-2">
+        <Button size="sm" className="h-9 gap-2" onClick={() => setNewBackupOpen(true)}>
           <Plus size={13} />
           New backup
         </Button>
@@ -42,7 +46,7 @@ export function BackupsView() {
       <div className="rounded-xl border border-border bg-card p-4">
         <div className="flex items-center justify-between mb-3">
           <div className="text-[13px] font-semibold">Backup schedules</div>
-          <Button variant="outline" size="sm" className="h-7 text-[11px]">
+          <Button variant="outline" size="sm" className="h-7 text-[11px]" onClick={() => setNewBackupScheduleOpen(true)}>
             <Plus size={10} className="mr-1" />
             New schedule
           </Button>
@@ -109,16 +113,16 @@ export function BackupsView() {
             <div className="col-span-1 flex items-center justify-end gap-0.5">
               {b.status === 'completed' && (
                 <>
-                  <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Download">
+                  <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Download" onClick={() => toast({ title: 'Download started', description: `${b.target} backup is downloading.` })}>
                     <Download size={11} />
                   </Button>
-                  <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Restore">
+                  <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Restore" onClick={() => toast({ title: 'Restore initiated', description: `${b.target} restore dialog would open here.` })}>
                     <RotateCcw size={11} />
                   </Button>
                 </>
               )}
               {b.status === 'failed' && (
-                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Retry">
+                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Retry" onClick={() => toast({ title: 'Retry queued', description: `${b.target} backup will retry.` })}>
                   <RotateCcw size={11} />
                 </Button>
               )}
