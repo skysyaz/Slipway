@@ -31,7 +31,7 @@ export type StackKind =
   | 'elixir'
   | 'dotnet'
 
-export type DatabaseKind = 'postgres' | 'mysql' | 'mariadb' | 'mongodb' | 'redis' | 'valkey' | 'sqlite'
+export type DatabaseKind = 'postgres' | 'mysql' | 'mariadb' | 'mongodb' | 'redis' | 'valkey' | 'sqlite' | 'mssql'
 
 export type PipelineStage =
   | 'queued'

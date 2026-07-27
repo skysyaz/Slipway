@@ -93,6 +93,7 @@ export function DbGlyph({ kind, size = 18 }: { kind: string; size?: number }) {
     redis: { label: 'R', bg: 'oklch(0.65 0.22 25)', fg: 'oklch(0.98 0 0)' },
     valkey: { label: 'V', bg: 'oklch(0.65 0.22 25)', fg: 'oklch(0.98 0 0)' },
     sqlite: { label: 'SQ', bg: 'oklch(0.7 0.12 220)', fg: 'oklch(0.16 0.005 240)' },
+    mssql: { label: 'MS', bg: 'oklch(0.6 0.18 250)', fg: 'oklch(0.98 0 0)' },
   }
   const m = map[kind] ?? { label: kind.slice(0, 2), bg: 'oklch(0.6 0.05 240)', fg: 'oklch(0.98 0 0)' }
   return (

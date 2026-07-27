@@ -63,11 +63,12 @@ export function DatabasesView() {
       </div>
 
       {/* Quick stats */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
         <QuickStat label="Postgres" value={databases.filter((d) => d.kind === 'postgres').length} icon={DatabaseIcon} color="oklch(0.65 0.18 250)" />
+        <QuickStat label="MySQL / MariaDB" value={databases.filter((d) => d.kind === 'mysql' || d.kind === 'mariadb').length} icon={DatabaseIcon} color="oklch(0.7 0.15 230)" />
+        <QuickStat label="MSSQL" value={databases.filter((d) => d.kind === 'mssql').length} icon={DatabaseIcon} color="oklch(0.6 0.18 250)" />
         <QuickStat label="Redis / Valkey" value={databases.filter((d) => d.kind === 'redis' || d.kind === 'valkey').length} icon={Activity} color="oklch(0.65 0.22 25)" />
         <QuickStat label="MongoDB" value={databases.filter((d) => d.kind === 'mongodb').length} icon={DatabaseIcon} color="oklch(0.7 0.18 140)" />
-        <QuickStat label="MySQL / MariaDB" value={databases.filter((d) => d.kind === 'mysql' || d.kind === 'mariadb').length} icon={DatabaseIcon} color="oklch(0.7 0.15 230)" />
       </div>
 
       <div className="relative max-w-sm">

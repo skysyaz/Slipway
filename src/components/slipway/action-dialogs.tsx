@@ -38,6 +38,7 @@ import {
   Loader2,
 } from 'lucide-react'
 import { useSlipway } from '@/lib/slipway/store'
+import { databaseVersions, databasePorts, latestDbVersion, dbMeta } from '@/lib/slipway/data'
 import { useToast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
 
@@ -66,6 +67,18 @@ function useSubmit() {
 // =============================================================================
 // New Database dialog
 // =============================================================================
+// Engine list — order matters (most common first). MSSQL added.
+const DB_ENGINES = [
+  'postgres',
+  'mysql',
+  'mariadb',
+  'mssql',
+  'mongodb',
+  'redis',
+  'valkey',
+  'sqlite',
+] as const
+
 export function NewDatabaseDialog() {
   const open = useSlipway((s) => s.newDatabaseOpen)
   const setOpen = useSlipway((s) => s.setNewDatabaseOpen)
@@ -74,31 +87,30 @@ export function NewDatabaseDialog() {
   const { toast } = useToast()
   const { submitting, run } = useSubmit()
 
-  const [kind, setKind] = React.useState('postgres')
+  const [kind, setKind] = React.useState<string>('postgres')
   const [name, setName] = React.useState('')
-  const [version, setVersion] = React.useState('16.4')
+  const [version, setVersion] = React.useState<string>(latestDbVersion('postgres'))
   const [size, setSize] = React.useState('20')
   const [projectId, setProjectId] = React.useState('')
   const [backups, setBackups] = React.useState(true)
 
   React.useEffect(() => {
     if (!open) {
-      setKind('postgres'); setName(''); setVersion('16.4'); setSize('20'); setProjectId(''); setBackups(true)
+      setKind('postgres')
+      setName('')
+      setVersion(latestDbVersion('postgres'))
+      setSize('20')
+      setProjectId('')
+      setBackups(true)
     }
   }, [open])
 
-  const versionOptions: Record<string, string[]> = {
-    postgres: ['16.4', '15.8', '14.13'],
-    mysql: ['8.0', '8.4'],
-    mariadb: ['11.5', '10.11'],
-    mongodb: ['7.0', '6.0'],
-    redis: ['7.4', '7.2'],
-    valkey: ['8.0', '7.2'],
-    sqlite: ['3.46'],
-  }
+  const versions = databaseVersions[kind] ?? []
+  const engineLabel = dbMeta(kind).label
 
-  const defaultPort: Record<string, number> = {
-    postgres: 5432, mysql: 3306, mariadb: 3306, mongodb: 27017, redis: 6379, valkey: 6379, sqlite: 0,
+  const pickEngine = (k: string) => {
+    setKind(k)
+    setVersion(latestDbVersion(k))
   }
 
   return (
@@ -118,10 +130,10 @@ export function NewDatabaseDialog() {
           <div>
             <Label className="text-[11px] font-medium mb-2 block">Engine</Label>
             <div className="grid grid-cols-4 gap-1.5">
-              {['postgres', 'mysql', 'mariadb', 'mongodb', 'redis', 'valkey', 'sqlite'].map((k) => (
+              {DB_ENGINES.map((k) => (
                 <button
                   key={k}
-                  onClick={() => { setKind(k); setVersion(versionOptions[k][0]) }}
+                  onClick={() => pickEngine(k)}
                   className={cn(
                     'h-9 rounded-md border text-[11px] font-mono capitalize transition-colors',
                     kind === k ? 'border-primary bg-primary/10 text-primary' : 'border-border hover:bg-accent',
@@ -138,16 +150,25 @@ export function NewDatabaseDialog() {
               <Input
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="helix-postgres"
+                placeholder={`helix-${kind}`}
                 className="font-mono text-[13px]"
               />
             </Field>
-            <Field label="Version">
+            <Field label="Version" hint={`${engineLabel} · ${versions.length} versions available`}>
               <Select value={version} onValueChange={setVersion}>
-                <SelectTrigger className="h-9 text-[13px]"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {versionOptions[kind].map((v) => (
-                    <SelectItem key={v} value={v}>{v}</SelectItem>
+                <SelectTrigger className="h-9 text-[13px] font-mono">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="max-h-[280px]">
+                  {versions.map((v) => (
+                    <SelectItem key={v} value={v}>
+                      <span className="font-mono">{v}</span>
+                      {v === versions[0] && (
+                        <Badge variant="outline" className="ml-2 text-[9px] h-4 px-1 bg-primary/10 text-primary border-primary/30">
+                          latest
+                        </Badge>
+                      )}
+                    </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
@@ -195,10 +216,10 @@ export function NewDatabaseDialog() {
                 version,
                 storageGb: parseInt(size),
                 projectId: projectId || undefined,
-                port: defaultPort[kind],
+                port: databasePorts[kind] ?? 5432,
                 backupsEnabled: backups,
               })
-              toast({ title: 'Database created', description: `${name} is running and ready.` })
+              toast({ title: 'Database created', description: `${name} (${engineLabel} ${version}) is running and ready.` })
             })}
             className="gap-2"
           >
