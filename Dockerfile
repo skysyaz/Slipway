@@ -32,10 +32,13 @@ ENV SLIPWAY_DATA_DIR=/data
 ENV SLIPWAY_BEHIND_PROXY=false
 ENV DATABASE_URL=file:/data/slipway.db
 
-RUN addgroup -S slipway && adduser -S slipway -G slipway
-
 RUN apk add --no-cache wget
 
+# ponytail: run as root. The container mounts /var/run/docker.sock (root:root)
+# so slipway can orchestrate host containers via dockerode; a non-root user gets
+# EACCES on the socket -> "docker engine unavailable" for every deploy/db/scan.
+# A socket-mounted container is already root-equivalent on the host, so dropping
+# privileges here buys nothing and breaks the core feature.
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/standalone/.next ./.next
 COPY --from=builder /app/public ./public
@@ -43,9 +46,9 @@ COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/src/lib/db.ts ./src/lib/db.ts
 COPY --from=builder /app/node_modules/bcryptjs ./node_modules/bcryptjs
 
-RUN mkdir -p /data && chown -R slipway:slipway /data /app
+RUN mkdir -p /data
 
-USER slipway
+USER root
 VOLUME ["/data"]
 EXPOSE 3000
 
