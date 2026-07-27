@@ -32,7 +32,11 @@ ENV SLIPWAY_DATA_DIR=/data
 ENV SLIPWAY_BEHIND_PROXY=false
 ENV DATABASE_URL=file:/data/slipway.db
 
-RUN apk add --no-cache wget
+# node: run the Next standalone server with Node — Bun's runtime mishandles
+# Next 16 App-Router routing under /api/auth/* (csrf/session/2fa all silently
+# 404 under `bun server.js`, work under `node server.js`). bun is kept only for
+# the prisma db push + TS seed step, which run fine under bun.
+RUN apk add --no-cache wget nodejs
 
 # ponytail: run as root. The container mounts /var/run/docker.sock (root:root)
 # so slipway can orchestrate host containers via dockerode; a non-root user gets
@@ -61,4 +65,4 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD wget --no-verbose --tries=1 --spider http://localhost:3000/ || exit 1
 
-CMD bunx prisma@6 db push --accept-data-loss && bun prisma/seed.ts && bun server.js
+CMD bunx prisma@6 db push --accept-data-loss && bun prisma/seed.ts && node server.js
