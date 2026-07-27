@@ -223,7 +223,7 @@ function DatabaseActions({ db }: { db: DatabaseInstance }) {
   const [removeData, setRemoveData] = React.useState(false)
   const [busy, setBusy] = React.useState(false)
 
-  const [creds, setCreds] = React.useState<{ username?: string; password?: string; dbName?: string; connectionString?: string; note?: string } | null>(null)
+  const [creds, setCreds] = React.useState<{ username?: string; password?: string; dbName?: string; connectionString?: string; externalConnectionString?: string; note?: string } | null>(null)
   const [editName, setEditName] = React.useState(db.name)
   // ponytail: Radix <SelectItem> forbids value="" (it reserves "" to clear the
   // selection / show the placeholder), so model "no project" as a sentinel and
@@ -236,7 +236,7 @@ function DatabaseActions({ db }: { db: DatabaseInstance }) {
     setCredsOpen(true)
     setCreds(null)
     try {
-      const c = await api.get<{ username?: string; password?: string; dbName?: string; connectionString: string; note?: string }>(`/api/databases/${db.id}/credentials`)
+      const c = await api.get<{ username?: string; password?: string; dbName?: string; connectionString: string; externalConnectionString?: string; note?: string }>(`/api/databases/${db.id}/credentials`)
       setCreds(c)
     } catch (e) {
       toast({ title: 'Could not load credentials', description: (e as Error).message, variant: 'destructive' })
@@ -317,6 +317,9 @@ function DatabaseActions({ db }: { db: DatabaseInstance }) {
               <CredLine label="Password" value={creds.password} mono />
               {creds.dbName && <CredLine label="Database" value={creds.dbName} mono />}
               <CredLine label="Connection string" value={creds.connectionString} mono />
+              {creds.externalConnectionString && (
+                <CredLine label="External (from outside server)" value={creds.externalConnectionString} mono />
+              )}
               {creds.note && <p className="text-[11px] text-amber-600 leading-snug pt-1">{creds.note}</p>}
             </div>
           )}

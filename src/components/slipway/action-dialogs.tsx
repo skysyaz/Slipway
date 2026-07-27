@@ -227,6 +227,9 @@ export function NewDatabaseDialog() {
                 <p className="text-[10px] text-muted-foreground leading-snug">
                   You can reveal the password again any time from the database&apos;s ⋯ menu → Show credentials.
                 </p>
+                <p className="text-[10px] text-amber-600 leading-snug">
+                  From outside the server, use the server&apos;s public IP (not {creds.host || 'localhost'}) and open TCP port {creds.port} in your firewall. See ⋯ → Show credentials for the external connection string.
+                </p>
               </div>
               <Button onClick={() => setOpen(false)} className="gap-2">Done</Button>
             </>

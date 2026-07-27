@@ -30,6 +30,7 @@ services:
       SLIPWAY_DATA_DIR: /data
       SLIPWAY_BEHIND_PROXY: "true"
       SLIPWAY_CLUSTER_ID: helix-eu
+      SLIPWAY_PUBLIC_HOST: "104.214.169.39"
       TZ: UTC
     volumes:
       - slipway-data:/data
