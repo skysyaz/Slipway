@@ -24,7 +24,7 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { useSlipway } from '@/lib/slipway/store'
 import { StackGlyph, StatusDot } from '../icons'
-import { TimeAgo, Duration, Sparkline, BytesShort } from '../format'
+import { TimeAgo, Duration, Sparkline, BytesShort, lastV } from '../format'
 import { cn } from '@/lib/utils'
 import type { Deployment, Project } from '@/lib/slipway/types'
 
@@ -47,6 +47,7 @@ export function OverviewView() {
   const avgSuccess = Math.round(projects.reduce((a, p) => a + p.successRate, 0) / projects.length * 10) / 10
 
   const inFlightDeploy = deployments.find((d) => d.status === 'building' || d.status === 'deploying')
+  const p95 = lastV(metrics.p95Latency.data)
 
   return (
     <div className="space-y-6">
@@ -118,7 +119,7 @@ export function OverviewView() {
         />
         <StatCard
           label="p95 latency"
-          value={`${Math.round(metrics.p95Latency.data[metrics.p95Latency.data.length - 1].v)}ms`}
+          value={p95 != null ? `${Math.round(p95)}ms` : '—'}
           sub="across production services"
           icon={Activity}
           trend="-8ms"

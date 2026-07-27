@@ -16,7 +16,7 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
 import { useSlipway } from '@/lib/slipway/store'
-import { Sparkline, BytesShort } from '../format'
+import { Sparkline, BytesShort, lastN } from '../format'
 import { cn } from '@/lib/utils'
 
 export function MetricsView() {
@@ -131,8 +131,8 @@ export function MetricsView() {
           .filter((c) => c.big)
           .map((c) => {
             const Icon = c.icon
-            const last = c.series[0].data[c.series[0].data.length - 1]
-            const max = Math.max(...c.series[0].data)
+            const last = lastN(c.series[0].data)
+            const max = Math.max(0, ...c.series[0].data)
             return (
               <div key={c.title} className="rounded-xl border border-border bg-card p-4">
                 <div className="flex items-start justify-between">
@@ -143,7 +143,7 @@ export function MetricsView() {
                     </div>
                     <div className="flex items-baseline gap-2 mt-1">
                       <span className="text-[28px] font-semibold tabular-nums">
-                        {last.toFixed(c.unit === '%' || c.unit === 'ms' ? 1 : 0)}
+                        {last != null ? last.toFixed(c.unit === '%' || c.unit === 'ms' ? 1 : 0) : '—'}
                       </span>
                       <span className="text-[12px] text-muted-foreground">{c.unit}</span>
                     </div>
@@ -176,8 +176,8 @@ export function MetricsView() {
           .filter((c) => !c.big)
           .map((c) => {
             const Icon = c.icon
-            const last = c.series[0].data[c.series[0].data.length - 1]
-            const max = Math.max(...c.series[0].data)
+            const last = lastN(c.series[0].data)
+            const max = Math.max(0, ...c.series[0].data)
             return (
               <div key={c.title} className="rounded-xl border border-border bg-card p-4">
                 <div className="flex items-start justify-between">
@@ -197,7 +197,7 @@ export function MetricsView() {
                 </div>
                 <div className="flex items-baseline gap-1.5 mt-1.5">
                   <span className="text-[20px] font-semibold tabular-nums">
-                    {last.toFixed(c.unit === '%' ? 1 : 0)}
+                    {last != null ? last.toFixed(c.unit === '%' ? 1 : 0) : '—'}
                   </span>
                   <span className="text-[11px] text-muted-foreground">{c.unit}</span>
                 </div>

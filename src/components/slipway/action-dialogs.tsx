@@ -38,6 +38,7 @@ import {
   Loader2,
 } from 'lucide-react'
 import { useSlipway } from '@/lib/slipway/store'
+import { api } from '@/lib/api'
 import { databaseVersions, databasePorts, latestDbVersion, dbMeta } from '@/lib/slipway/data'
 import { useToast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
@@ -630,7 +631,7 @@ export function NewPreviewDialog() {
   const open = useSlipway((s) => s.newPreviewOpen)
   const setOpen = useSlipway((s) => s.setNewPreviewOpen)
   const projects = useSlipway((s) => s.projects)
-  const triggerDeployment = useSlipway((s) => s.triggerDeployment)
+  const createAndDeploy = useSlipway((s) => s.createAndDeploy)
   const { toast } = useToast()
   const { submitting, run } = useSubmit()
 
@@ -677,7 +678,7 @@ export function NewPreviewDialog() {
             disabled={!projectId || !branch || submitting}
             onClick={() => run(() => {
               const project = projects.find((p) => p.id === projectId)
-              triggerDeployment(projectId)
+              void createAndDeploy({ existingProjectId: projectId, branch, environment: 'preview' })
               toast({ title: 'Preview started', description: `${project?.name} preview for ${branch} is building.` })
               setOpen(false)
             })}
@@ -764,7 +765,7 @@ export function NewServerDialog() {
           <Button
             disabled={!ip || !name || submitting}
             onClick={() => run(() => {
-              addServer({ name, hostname: name + '.slipway.run', ip, role, os: 'Ubuntu 24.04 LTS', cpuCores: 4, memoryGb: 16, diskGb: 200, region: 'eu-fra1' })
+              addServer({ name, hostname: name + '.slipway.run', ip, role, os: 'Ubuntu 24.04 LTS', cpuCores: 4, memoryGb: 16, diskGb: 200, region: 'eu-fra1', sshUser: user, sshKeyId: sshKey })
               toast({ title: 'Server connected', description: `${name} joined the cluster as ${role}.` })
             })}
             className="gap-2"
@@ -836,7 +837,7 @@ export function NewSshKeyDialog() {
           <Button
             disabled={!name || !publicKey || submitting}
             onClick={() => run(() => {
-              useSlipway.getState().addActivity('server', `added SSH key "${name}" (${scope} scope)`)
+              void api.post('/api/ssh-keys', { name, publicKey, scope })
               setOpen(false)
               toast({ title: 'SSH key added', description: `${name} can now be used for ${scope} access.` })
             })}
@@ -911,7 +912,7 @@ export function NewRegistryDialog() {
           <Button
             disabled={!name || !url || submitting}
             onClick={() => run(() => {
-              useSlipway.getState().addActivity('server', `added registry "${name}" (${url})`)
+              void api.post('/api/registries', { name, url, auth, token: auth === 'token' ? token : undefined, password: auth === 'basic' ? token : undefined })
               setOpen(false)
               toast({ title: 'Registry added', description: `${name} connected.` })
             })}
@@ -988,7 +989,7 @@ export function NewWebhookDialog() {
           <Button
             disabled={!url || events.length === 0 || submitting}
             onClick={() => run(() => {
-              useSlipway.getState().addActivity('server', `added webhook ${url} (${events.length} events)`)
+              void api.post('/api/webhooks', { url, events })
               setOpen(false)
               toast({ title: 'Webhook added', description: `Subscribed to ${events.length} event${events.length === 1 ? '' : 's'}.` })
             })}
@@ -1075,10 +1076,9 @@ export function NewTokenDialog() {
           {!generated && (
             <Button
               disabled={!name || submitting}
-              onClick={() => run(() => {
-                const tok = 'sk_' + Array.from({ length: 40 }, () => Math.random().toString(36)[2]).join('')
-                setGenerated(tok)
-                useSlipway.getState().addActivity('server', `created API token "${name}" (${scope} scope)`)
+              onClick={() => run(async () => {
+                const res = await api.post<{ token: string }>('/api/tokens', { name, scope })
+                setGenerated(res.token)
               })}
               className="gap-2"
             >
@@ -1098,6 +1098,7 @@ export function NewTokenDialog() {
 export function AddServiceDialog({ projectId }: { projectId: string }) {
   const open = useSlipway((s) => s.addServiceOpen)
   const setOpen = useSlipway((s) => s.setAddServiceOpen)
+  const addService = useSlipway((s) => s.addService)
   const { toast } = useToast()
   const { submitting, run } = useSubmit()
 
@@ -1146,29 +1147,7 @@ export function AddServiceDialog({ projectId }: { projectId: string }) {
           <Button
             disabled={!name || !image || submitting}
             onClick={() => run(() => {
-              // Add service to project in store
-              const state = useSlipway.getState()
-              const project = state.projects.find((p) => p.id === projectId)
-              if (project) {
-                const newSvc = {
-                  id: 'svc-' + Math.random().toString(36).slice(2, 9),
-                  name,
-                  kind,
-                  status: 'running' as const,
-                  image,
-                  replicas: 1,
-                  memoryMb: 256,
-                  cpuMilli: 200,
-                  uptimeSeconds: 0,
-                  restarts: 0,
-                }
-                useSlipway.setState((s) => ({
-                  projects: s.projects.map((p) =>
-                    p.id === projectId ? { ...p, services: [...p.services, newSvc] } : p,
-                  ),
-                }))
-                state.addActivity('scale', `added service "${name}" to ${project.name}`, projectId)
-              }
+              void addService(projectId, { name, kind, image, replicas: 1, memoryMb: 256, cpuMilli: 200 })
               setOpen(false)
               toast({ title: 'Service added', description: `${name} is now scheduled.` })
             })}

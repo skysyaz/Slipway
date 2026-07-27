@@ -39,10 +39,11 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Progress } from '@/components/ui/progress'
 import { useSlipway } from '@/lib/slipway/store'
+import { api, ApiError } from '@/lib/api'
 import { StackGlyph, DbGlyph, StatusDot } from '../icons'
-import { TimeAgo, Duration, Memory, Cpu as CpuFmt, Sparkline, BytesShort } from '../format'
+import { TimeAgo, Duration, Memory, Cpu as CpuFmt, Sparkline, BytesShort, lastV } from '../format'
 import { cn } from '@/lib/utils'
-import { useToast } from '@/hooks/use-toast'
+import { useToast, toast } from '@/hooks/use-toast'
 import type { Project, Deployment } from '@/lib/slipway/types'
 
 export function ProjectDetailView() {
@@ -327,7 +328,7 @@ function OverviewTab({ project, onRollbackClick }: { project: Project; onRollbac
         <div className="rounded-xl border border-border bg-card p-4">
           <div className="text-[13px] font-semibold mb-3">Live traffic</div>
           <div className="text-[28px] font-semibold tabular-nums">
-            {Math.round(metrics.requestsPerSec.data[metrics.requestsPerSec.data.length - 1].v)}
+            {(() => { const v = lastV(metrics.requestsPerSec.data); return v != null ? Math.round(v) : '—' })()}
             <span className="text-[12px] text-muted-foreground ml-1.5 font-normal">req/s</span>
           </div>
           <div className="mt-2">
@@ -337,13 +338,13 @@ function OverviewTab({ project, onRollbackClick }: { project: Project; onRollbac
             <div>
               <div className="text-muted-foreground">p95 latency</div>
               <div className="font-mono mt-0.5">
-                {Math.round(metrics.p95Latency.data[metrics.p95Latency.data.length - 1].v)}ms
+                {(() => { const v = lastV(metrics.p95Latency.data); return v != null ? `${Math.round(v)}ms` : '—' })()}
               </div>
             </div>
             <div>
               <div className="text-muted-foreground">Error rate</div>
               <div className="font-mono mt-0.5 text-amber-500">
-                {metrics.errorRate.data[metrics.errorRate.data.length - 1].v.toFixed(2)}%
+                {(() => { const v = lastV(metrics.errorRate.data); return v != null ? `${v.toFixed(2)}%` : '—' })()}
               </div>
             </div>
           </div>
@@ -632,22 +633,43 @@ function DomainsTab({ project, onAddDomain }: { project: Project; onAddDomain: (
 
 function EnvTab({ project }: { project: Project }) {
   const { toast } = useToast()
-  const [vars, setVars] = React.useState([
-    { key: 'DATABASE_URL', value: 'postgres://helix:•••••@pg-1.internal.slipway.run:5432/helix', scope: 'all', masked: true },
-    { key: 'REDIS_URL', value: 'redis://redis-1.internal.slipway.run:6379', scope: 'all', masked: false },
-    { key: 'STRIPE_SECRET_KEY', value: 'sk_live_••••••••••••••••', scope: 'production', masked: true },
-    { key: 'STRIPE_WEBHOOK_SECRET', value: 'whsec_•••••••••••••', scope: 'all', masked: true },
-    { key: 'NEXT_PUBLIC_APP_URL', value: project.url ?? 'https://app.example.com', scope: 'all', masked: false },
-    { key: 'LOG_LEVEL', value: 'info', scope: 'all', masked: false },
-    { key: 'SENTRY_DSN', value: 'https://•••••@sentry.io/1234', scope: 'all', masked: true },
-    { key: 'SMTP_URL', value: 'smtp://postmark@smtp.postmarkapp.com:587', scope: 'all', masked: true },
-  ])
+  const refetch = useSlipway((s) => s.refetch)
+  const vars = project.envVars
   const [newKey, setNewKey] = React.useState('')
   const [newValue, setNewValue] = React.useState('')
+  const [newScope, setNewScope] = React.useState('all')
+  const [revealed, setRevealed] = React.useState<Record<string, boolean>>({})
 
   const copyVal = (v: string) => {
     navigator.clipboard?.writeText(v)
     toast({ title: 'Copied', description: 'Value copied to clipboard.' })
+  }
+
+  const addVar = async () => {
+    if (!newKey) return
+    try {
+      await api.post(`/api/projects/${project.id}/env-vars`, { key: newKey, value: newValue, scope: newScope, masked: false })
+      setNewKey('')
+      setNewValue('')
+      toast({ title: 'Variable added', description: `${newKey} will be applied on next restart.` })
+      await refetch(['projects', 'activity'])
+    } catch (e) {
+      toast({ title: 'Failed', description: e instanceof ApiError ? e.message : 'error', variant: 'destructive' })
+    }
+  }
+
+  const deleteVar = async (eid: string, key: string) => {
+    await api.del(`/api/projects/${project.id}/env-vars/${eid}`)
+    toast({ title: 'Variable deleted', description: key })
+    await refetch(['projects', 'activity'])
+  }
+
+  const editVar = async (eid: string, key: string) => {
+    const value = window.prompt(`New value for ${key}`) || ''
+    if (!value) return
+    await api.put(`/api/projects/${project.id}/env-vars/${eid}`, { value })
+    toast({ title: 'Variable updated', description: key })
+    await refetch(['projects', 'activity'])
   }
 
   return (
@@ -656,13 +678,9 @@ function EnvTab({ project }: { project: Project }) {
         <div>
           <h3 className="text-[15px] font-semibold">Environment variables</h3>
           <p className="text-[12px] text-muted-foreground mt-0.5">
-            Encrypted at rest. Variables can be scoped to environments (production, staging, preview). Changes trigger a rolling restart.
+            Stored in the Slipway database. Variables can be scoped to environments (production, staging, preview). Changes trigger a rolling restart.
           </p>
         </div>
-        <Button variant="outline" size="sm" className="h-9 gap-2" onClick={() => toast({ title: 'Pull from .env', description: 'Upload a .env file dialog would open here.' })}>
-          <KeyRound size={13} />
-          Pull from .env
-        </Button>
       </div>
 
       <div className="rounded-xl border border-border bg-card overflow-hidden">
@@ -672,25 +690,30 @@ function EnvTab({ project }: { project: Project }) {
           <div className="col-span-2">Scope</div>
           <div className="col-span-1"></div>
         </div>
-        {vars.map((v, i) => (
-          <div key={i} className="grid grid-cols-12 gap-2 px-3 py-2 items-center border-b border-border last:border-b-0 hover:bg-accent/30 transition-colors">
+        {vars.length === 0 && (
+          <div className="px-3 py-6 text-center text-[13px] text-muted-foreground">No environment variables yet.</div>
+        )}
+        {vars.map((v) => (
+          <div key={v.id} className="grid grid-cols-12 gap-2 px-3 py-2 items-center border-b border-border last:border-b-0 hover:bg-accent/30 transition-colors">
             <div className="col-span-3 font-mono text-[12px] truncate">{v.key}</div>
-            <div className="col-span-6 font-mono text-[12px] truncate text-muted-foreground">
-              {v.masked ? v.value : v.value}
-              <button
-                onClick={() => copyVal(v.value)}
-                className="ml-2 inline-flex opacity-0 hover:opacity-100 group-hover:opacity-100"
-                title="Copy"
-              >
-                <Copy size={10} />
-              </button>
+            <div className="col-span-6 font-mono text-[12px] truncate text-muted-foreground flex items-center gap-2">
+              <span className="truncate">{revealed[v.id] ? v.value : (v.masked ? '••••••••' : v.value)}</span>
+              <button onClick={() => copyVal(v.value)} title="Copy"><Copy size={10} /></button>
+              {v.masked && (
+                <button onClick={() => setRevealed((r) => ({ ...r, [v.id]: !r[v.id] }))} title="Reveal">
+                  {revealed[v.id] ? <AlertTriangle size={10} /> : <Check size={10} />}
+                </button>
+              )}
             </div>
             <div className="col-span-2">
               <Badge variant="outline" className="text-[9px] h-4 capitalize">{v.scope}</Badge>
             </div>
             <div className="col-span-1 text-right">
-              <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => toast({ title: 'Edit variable', description: `Edit or delete ${v.key}.` })}>
-                <MoreHorizontal size={12} />
+              <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => void editVar(v.id, v.key)} title="Edit">
+                <Pencil size={11} />
+              </Button>
+              <Button variant="ghost" size="sm" className="h-7 w-7 p-0 text-rose-500 hover:text-rose-500" onClick={() => void deleteVar(v.id, v.key)} title="Delete">
+                <Trash2 size={11} />
               </Button>
             </div>
           </div>
@@ -710,19 +733,19 @@ function EnvTab({ project }: { project: Project }) {
             placeholder="value"
             value={newValue}
             onChange={(e) => setNewValue(e.target.value)}
-            className="col-span-7 font-mono text-[12px] h-8"
+            className="col-span-6 font-mono text-[12px] h-8"
           />
-          <Button
-            size="sm"
-            className="col-span-2 h-8"
-            onClick={() => {
-              if (!newKey) return
-              setVars([...vars, { key: newKey, value: newValue, scope: 'all', masked: false }])
-              setNewKey('')
-              setNewValue('')
-              toast({ title: 'Variable added', description: `${newKey} will be applied on next restart.` })
-            }}
+          <select
+            value={newScope}
+            onChange={(e) => setNewScope(e.target.value)}
+            className="col-span-1 h-8 px-2 rounded-md border border-border bg-background text-[12px]"
           >
+            <option value="all">all</option>
+            <option value="production">prod</option>
+            <option value="staging">staging</option>
+            <option value="preview">preview</option>
+          </select>
+          <Button size="sm" className="col-span-2 h-8" onClick={() => void addVar()}>
             <Plus size={12} className="mr-1" />
             Add
           </Button>
@@ -825,8 +848,8 @@ function MetricsTab({ project }: { project: Project }) {
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
       {charts.map((c) => {
-        const last = c.data[c.data.length - 1].v
-        const max = Math.max(...c.data.map((p) => p.v))
+        const last = lastV(c.data)
+        const max = Math.max(0, ...c.data.map((p) => p.v))
         return (
           <div key={c.title} className="rounded-xl border border-border bg-card p-4">
             <div className="flex items-center justify-between mb-2">
@@ -835,7 +858,7 @@ function MetricsTab({ project }: { project: Project }) {
             </div>
             <div className="flex items-baseline gap-2">
               <div className="text-[22px] font-semibold tabular-nums">
-                {last.toFixed(c.unit === '%' ? 1 : 0)}
+                {last != null ? last.toFixed(c.unit === '%' ? 1 : 0) : '—'}
                 <span className="text-[11px] text-muted-foreground ml-1 font-normal">{c.unit}</span>
               </div>
               <div className="text-[10px] text-muted-foreground font-mono">
@@ -906,6 +929,52 @@ function ProjectBackupsTab({ project, onRunBackup }: { project: Project; onRunBa
 
 function SettingsTab({ project }: { project: Project }) {
   const { toast } = useToast()
+  const refetch = useSlipway((s) => s.refetch)
+  const setView = useSlipway((s) => s.setView)
+
+  const [name, setName] = React.useState(project.name)
+  const [slug, setSlug] = React.useState(project.slug)
+  const [description, setDescription] = React.useState(project.description ?? '')
+  const [minReplicas, setMinReplicas] = React.useState(project.minReplicas)
+  const [maxReplicas, setMaxReplicas] = React.useState(project.maxReplicas)
+  const [memoryMb, setMemoryMb] = React.useState(project.memoryMb)
+  const [cpuMilli, setCpuMilli] = React.useState(project.cpuMilli)
+
+  const patch = async (data: Record<string, unknown>, msg = 'Project settings updated.') => {
+    try {
+      await api.patch(`/api/projects/${project.id}`, data)
+      toast({ title: 'Saved', description: msg })
+      await refetch(['projects', 'activity'])
+    } catch (e) {
+      toast({ title: 'Failed', description: e instanceof ApiError ? e.message : 'error', variant: 'destructive' })
+    }
+  }
+
+  const saveGeneral = () => void patch({ name, slug, description })
+  const saveResources = () => void patch({ minReplicas, maxReplicas, memoryMb, cpuMilli }, 'Resource limits saved.')
+
+  const toggle = (key: 'autoDeploy' | 'requireTests' | 'autoRollback' | 'pauseDuringWindows' | 'prPreviews', value: boolean) => {
+    void patch({ [key]: value })
+  }
+
+  const pause = async () => {
+    await api.post(`/api/projects/${project.id}/pause`)
+    toast({ title: 'Project paused', description: `${project.name} services stopped.`, variant: 'destructive' })
+    await refetch(['projects', 'activity'])
+  }
+  const disconnect = async () => {
+    await api.post(`/api/projects/${project.id}/disconnect-source`)
+    toast({ title: 'Source disconnected', description: `Repository removed from ${project.name}.` })
+    await refetch(['projects', 'activity'])
+  }
+  const del = async () => {
+    if (!window.confirm(`Delete ${project.name}? This cannot be undone.`)) return
+    await api.del(`/api/projects/${project.id}`)
+    toast({ title: 'Project deleted', description: `${project.name} and all its resources removed.`, variant: 'destructive' })
+    setView('projects')
+    await refetch(['projects', 'activity'])
+  }
+
   return (
     <div className="space-y-5 max-w-3xl">
       <SettingsCard title="General" description="Project name, slug, and description.">
@@ -913,32 +982,30 @@ function SettingsTab({ project }: { project: Project }) {
           <div className="grid grid-cols-2 gap-3">
             <div>
               <Label className="text-[11px]">Name</Label>
-              <Input defaultValue={project.name} className="mt-1 h-8 text-[13px]" />
+              <Input value={name} onChange={(e) => setName(e.target.value)} className="mt-1 h-8 text-[13px]" />
             </div>
             <div>
               <Label className="text-[11px]">Slug</Label>
-              <Input defaultValue={project.slug} className="mt-1 h-8 text-[13px] font-mono" />
+              <Input value={slug} onChange={(e) => setSlug(e.target.value)} className="mt-1 h-8 text-[13px] font-mono" />
             </div>
           </div>
           <div>
             <Label className="text-[11px]">Description</Label>
-            <Input defaultValue={project.description} className="mt-1 h-8 text-[13px]" />
+            <Input value={description} onChange={(e) => setDescription(e.target.value)} className="mt-1 h-8 text-[13px]" />
           </div>
           <div className="flex justify-end">
-            <Button size="sm" className="h-8" onClick={() => toast({ title: 'Saved', description: 'Project settings updated.' })}>
-              Save changes
-            </Button>
+            <Button size="sm" className="h-8" onClick={saveGeneral}>Save changes</Button>
           </div>
         </div>
       </SettingsCard>
 
       <SettingsCard title="Build & Deploy" description="Configure how this project is built and released.">
         <div className="space-y-3">
-          <ToggleRow label="Auto-deploy on push to main" description="Trigger a new deployment when commits land on the main branch." defaultChecked />
-          <ToggleRow label="Require passing tests" description="Block deploys if any test step fails." defaultChecked />
-          <ToggleRow label="Auto-rollback on health check failure" description="If the new release fails health checks within 60s, automatically roll back." defaultChecked />
-          <ToggleRow label="Pause during deploy windows" description="Skip deploys during configured maintenance windows." />
-          <ToggleRow label="PR preview environments" description="Spin up a temporary environment for every pull request." defaultChecked={project.environment === 'preview'} />
+          <ToggleRow label="Auto-deploy on push to main" description="Trigger a new deployment when commits land on the main branch." checked={project.autoDeploy} onChange={(v) => toggle('autoDeploy', v)} />
+          <ToggleRow label="Require passing tests" description="Block deploys if any test step fails." checked={project.requireTests} onChange={(v) => toggle('requireTests', v)} />
+          <ToggleRow label="Auto-rollback on health check failure" description="If the new release fails health checks within 60s, automatically roll back." checked={project.autoRollback} onChange={(v) => toggle('autoRollback', v)} />
+          <ToggleRow label="Pause during deploy windows" description="Skip deploys during configured maintenance windows." checked={project.pauseDuringWindows} onChange={(v) => toggle('pauseDuringWindows', v)} />
+          <ToggleRow label="PR preview environments" description="Spin up a temporary environment for every pull request." checked={project.prPreviews} onChange={(v) => toggle('prPreviews', v)} />
         </div>
       </SettingsCard>
 
@@ -946,28 +1013,31 @@ function SettingsTab({ project }: { project: Project }) {
         <div className="grid grid-cols-2 gap-4">
           <div>
             <Label className="text-[11px]">Min replicas</Label>
-            <Input type="number" defaultValue={1} className="mt-1 h-8 text-[13px] font-mono" />
+            <Input type="number" value={minReplicas} onChange={(e) => setMinReplicas(Number(e.target.value))} className="mt-1 h-8 text-[13px] font-mono" />
           </div>
           <div>
             <Label className="text-[11px]">Max replicas</Label>
-            <Input type="number" defaultValue={6} className="mt-1 h-8 text-[13px] font-mono" />
+            <Input type="number" value={maxReplicas} onChange={(e) => setMaxReplicas(Number(e.target.value))} className="mt-1 h-8 text-[13px] font-mono" />
           </div>
           <div>
             <Label className="text-[11px]">Memory limit (MB)</Label>
-            <Input type="number" defaultValue={project.memoryMb} className="mt-1 h-8 text-[13px] font-mono" />
+            <Input type="number" value={memoryMb} onChange={(e) => setMemoryMb(Number(e.target.value))} className="mt-1 h-8 text-[13px] font-mono" />
           </div>
           <div>
             <Label className="text-[11px]">CPU limit (millicores)</Label>
-            <Input type="number" defaultValue={project.cpuMilli} className="mt-1 h-8 text-[13px] font-mono" />
+            <Input type="number" value={cpuMilli} onChange={(e) => setCpuMilli(Number(e.target.value))} className="mt-1 h-8 text-[13px] font-mono" />
           </div>
+        </div>
+        <div className="flex justify-end mt-3">
+          <Button size="sm" className="h-8" onClick={saveResources}>Save resources</Button>
         </div>
       </SettingsCard>
 
-      <SettingsCard title="Notifications" description="Where Slipway sends deployment, backup, and alert notifications.">
+      <SettingsCard title="Notifications" description="Per-project notification preferences, persisted to Slipway settings.">
         <div className="space-y-3">
-          <ToggleRow label="Email on failed deploy" description="Send an email when a deployment fails." defaultChecked />
-          <ToggleRow label="Slack on production deploys" description="Post to #deploys when production is updated." defaultChecked />
-          <ToggleRow label="Webhook on rollback" description="POST to a configured webhook URL when an automatic rollback occurs." />
+          <ToggleRow label="Email on failed deploy" description="Send an email when a deployment fails." checked={useProjectSetting(project.id, 'notify:emailFailed')} onChange={(v) => void setProjectSetting(project.id, 'notify:emailFailed', v)} />
+          <ToggleRow label="Slack on production deploys" description="Post to the connected Slack when production is updated." checked={useProjectSetting(project.id, 'notify:slackDeploys')} onChange={(v) => void setProjectSetting(project.id, 'notify:slackDeploys', v)} />
+          <ToggleRow label="Webhook on rollback" description="POST to configured webhooks when an automatic rollback occurs." checked={useProjectSetting(project.id, 'notify:webhookRollback')} onChange={(v) => void setProjectSetting(project.id, 'notify:webhookRollback', v)} />
         </div>
       </SettingsCard>
 
@@ -977,25 +1047,40 @@ function SettingsTab({ project }: { project: Project }) {
             title="Pause this project"
             description="Stop all services. Deploys and backups are suspended."
             buttonLabel="Pause"
-            onConfirm={() => toast({ title: 'Project paused', description: `${project.name} services stopped.`, variant: 'destructive' })}
+            onConfirm={() => void pause()}
           />
           <DangerRow
             title="Disconnect source"
             description="Remove the connected repository or folder. Existing services keep running."
             buttonLabel="Disconnect"
-            onConfirm={() => toast({ title: 'Source disconnected', description: `Repository removed from ${project.name}.` })}
+            onConfirm={() => void disconnect()}
           />
           <DangerRow
             title="Delete project"
             description="Permanently delete the project, its services, domains, and history. Backups are retained per policy."
             buttonLabel="Delete"
             destructive
-            onConfirm={() => toast({ title: 'Project deleted', description: `${project.name} and all its resources removed.`, variant: 'destructive' })}
+            onConfirm={() => void del()}
           />
         </div>
       </SettingsCard>
     </div>
   )
+}
+
+// Per-project notification preferences stored as Setting rows.
+function useProjectSetting(projectId: string, key: string): boolean {
+  const [val, setVal] = React.useState(false)
+  React.useEffect(() => {
+    void api.get<{ settings: Record<string, string> }>('/api/settings').then((s) => {
+      setVal(s.settings[`project:${projectId}:${key}`] === 'true')
+    }).catch(() => {})
+  }, [projectId, key])
+  return val
+}
+
+async function setProjectSetting(projectId: string, key: string, value: boolean): Promise<void> {
+  await api.patch('/api/settings', { settings: { [`project:${projectId}:${key}`]: String(value) } })
 }
 
 function SettingsCard({ title, description, children }: { title: string; description: string; children: React.ReactNode }) {
@@ -1010,14 +1095,14 @@ function SettingsCard({ title, description, children }: { title: string; descrip
   )
 }
 
-function ToggleRow({ label, description, defaultChecked }: { label: string; description: string; defaultChecked?: boolean }) {
+function ToggleRow({ label, description, checked, onChange }: { label: string; description: string; checked?: boolean; onChange?: (v: boolean) => void }) {
   return (
     <div className="flex items-start justify-between gap-3 py-1.5">
       <div className="flex-1">
         <div className="text-[13px] font-medium">{label}</div>
         <div className="text-[11px] text-muted-foreground mt-0.5">{description}</div>
       </div>
-      <Switch defaultChecked={defaultChecked} />
+      <Switch checked={checked} onCheckedChange={onChange} />
     </div>
   )
 }

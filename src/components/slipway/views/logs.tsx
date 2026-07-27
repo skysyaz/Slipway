@@ -9,25 +9,51 @@ import { cn } from '@/lib/utils'
 
 export function LogsView() {
   const logs = useSlipway((s) => s.logs)
-  const pushLog = useSlipway((s) => s.pushLog)
-  const appendLogs = useSlipway((s) => s.appendLogs)
+  const appendLogLine = useSlipway((s) => s.appendLogLine)
   const [paused, setPaused] = React.useState(false)
   const [query, setQuery] = React.useState('')
   const [levelFilter, setLevelFilter] = React.useState<string>('all')
   const [serviceFilter, setServiceFilter] = React.useState<string>('all')
   const containerRef = React.useRef<HTMLDivElement>(null)
 
+  // Stream real container logs from /api/logs/stream (Docker-backed, no fake data).
   React.useEffect(() => {
-    if (paused) return
-    const id = setInterval(() => pushLog(), 1100)
-    return () => clearInterval(id)
-  }, [paused, pushLog])
+    const es = new EventSource('/api/logs/stream')
+    es.onmessage = (ev) => {
+      try {
+        const line = JSON.parse(ev.data)
+        appendLogLine({
+          id: String(line.id),
+          ts: new Date(line.ts).toISOString(),
+          level: line.level,
+          service: String(line.service),
+          message: String(line.message),
+        })
+      } catch {
+        /* ignore malformed frame */
+      }
+    }
+    return () => es.close()
+  }, [appendLogLine])
 
   React.useEffect(() => {
     if (containerRef.current && !paused) {
       containerRef.current.scrollTop = containerRef.current.scrollHeight
     }
   }, [logs, paused])
+
+  const exportLogs = () => {
+    const blob = new Blob(
+      [logs.map((l) => `${l.ts} ${l.level.toUpperCase()} ${l.service} ${l.message}`).join('\n')],
+      { type: 'text/plain' },
+    )
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'slipway-logs.txt'
+    a.click()
+    URL.revokeObjectURL(url)
+  }
 
   const filtered = logs.filter((l) => {
     if (levelFilter !== 'all' && l.level !== levelFilter) return false
@@ -66,7 +92,7 @@ export function LogsView() {
             {paused ? <Play size={13} /> : <Pause size={13} />}
             {paused ? 'Resume' : 'Pause'}
           </Button>
-          <Button variant="outline" size="sm" className="h-9 gap-2" onClick={() => appendLogs(40)}>
+          <Button variant="outline" size="sm" className="h-9 gap-2" onClick={exportLogs}>
             <Download size={13} />
             Export
           </Button>
@@ -98,13 +124,13 @@ export function LogsView() {
             </button>
           ))}
         </div>
-        <div className="flex items-center gap-1 rounded-md border border-border p-0.5 h-9">
-          {['all', 'api', 'web', 'worker', 'ingest', 'scheduler', 'slipway'].map((s) => (
+        <div className="flex items-center gap-1 rounded-md border border-border p-0.5 h-9 overflow-x-auto max-w-full">
+          {['all', ...Array.from(new Set(logs.map((l) => l.service))).sort()].slice(0, 12).map((s) => (
             <button
               key={s}
               onClick={() => setServiceFilter(s)}
               className={cn(
-                'px-2.5 h-8 rounded text-[11px] font-mono transition-colors',
+                'px-2.5 h-8 rounded text-[11px] font-mono whitespace-nowrap transition-colors',
                 serviceFilter === s ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground',
               )}
             >

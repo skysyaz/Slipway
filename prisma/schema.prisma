@@ -1,8 +1,6 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+// Slipway — Prisma schema
+// SQLite-backed store for the self-hosted deployment platform.
+// Mirrors src/lib/slipway/types.ts plus auth/integrations/scheduling.
 
 generator client {
   provider = "prisma-client-js"
@@ -13,20 +11,365 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// ---------------------------------------------------------------------------
+// Auth (NextAuth v4 adapter-compatible, simplified)
+// ---------------------------------------------------------------------------
+
 model User {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  name      String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id           String   @id @default(cuid())
+  username     String   @unique
+  email        String?  @unique
+  passwordHash String?
+  role         String   @default("admin") // admin | user
+  displayName  String?
+  totpSecret   String?
+  totpEnabled  Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  accounts Account[]
+  sessions Session[]
+  tokens   ApiToken[]
+  activity ActivityEvent[]
 }
 
-model Post {
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  provider          String // credentials | github | gitlab | oidc | saml
+  providerAccountId String
+  type              String @default("oauth")
+  refreshToken String?
+  accessToken  String?
+  expiresAt    Int?
+  scope       String?
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ---------------------------------------------------------------------------
+// Core platform entities
+// ---------------------------------------------------------------------------
+
+model Project {
+  id                 String   @id @default(cuid())
+  name               String
+  slug               String   @unique
+  source             String   // git | folder | compose
+  repoUrl            String?
+  folderPath         String?
+  composePath        String?
+  stack              String   // StackKind
+  stackLabel         String
+  framework          String?
+  environment        String   // production | staging | preview
+  status             String   @default("stopped") // ServiceStatus
+  lastDeployedAt     DateTime?
+  url                String?
+  description        String?
+  region             String   @default("local")
+  memoryMb           Int      @default(512)
+  cpuMilli           Int      @default(400)
+  replicas           Int      @default(1)
+  minReplicas        Int      @default(1)
+  maxReplicas        Int      @default(6)
+  monorepo           Boolean  @default(false)
+  monorepoPath       String?
+  // deploy policy
+  autoDeploy         Boolean  @default(true)
+  requireTests       Boolean  @default(false)
+  autoRollback       Boolean  @default(true)
+  pauseDuringWindows Boolean  @default(false)
+  prPreviews         Boolean  @default(true)
+  buildCmd           String?
+  startCmd           String?
+  // docker linkage
+  dockerImage        String?
+  dockerContainerId  String?
+  // env metadata cached for lists
+  envVarsCount       Int      @default(0)
+  monthlyDeploys     Int      @default(0)
+  successRate        Float    @default(100)
+  paused             Boolean  @default(false)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  services   Service[]
+  domains    Domain[]
+  envVars    EnvVar[]
+  deployments Deployment[]
+  databases  DatabaseInstance[]
+  volumes    Volume[]
+  activity   ActivityEvent[]
+  notifications Notification[]
+  backups    BackupRecord[]
+}
+
+model Service {
+  id                String  @id @default(cuid())
+  projectId         String
+  name              String
+  kind              String // app | worker | database | cache | cron
+  status            String  @default("stopped")
+  image             String
+  port              Int?
+  replicas          Int     @default(1)
+  memoryMb          Int     @default(256)
+  cpuMilli          Int     @default(200)
+  uptimeSeconds     Int     @default(0)
+  restarts          Int     @default(0)
+  dockerContainerId String?
+  project           Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  metrics MetricSample[]
+}
+
+model Domain {
+  id        String  @id @default(cuid())
+  projectId String
+  hostname  String
+  type      String  @default("primary") // primary | api | redirect | preview
+  ssl       String  @default("disabled") // managed | custom | pending | disabled
+  sslExpiry DateTime?
+  https     Boolean @default(false)
+  status    String  @default("pending") // active | pending | failed
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+model EnvVar {
+  id        String @id @default(cuid())
+  projectId String
+  key       String
+  value     String
+  scope     String @default("all") // all | production | staging | preview
+  masked    Boolean @default(false)
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, key, scope])
+}
+
+model Deployment {
+  id            String   @id @default(cuid())
+  projectId     String
+  commitSha     String   @default("")
+  commitMessage String  @default("")
+  branch        String   @default("main")
+  author        String   @default("you")
+  environment   String   @default("production")
+  status        String   @default("queued") // DeploymentStatus
+  createdAt     DateTime @default(now())
+  finishedAt    DateTime?
+  durationMs    Int?
+  rollbackOfId  String?
+  url           String?
+  project       Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  steps         DeploymentStep[]
+
+  @@index([projectId])
+}
+
+model DeploymentStep {
+  id          String  @id @default(cuid())
+  deploymentId String
+  stage       String  // PipelineStage
+  label       String
+  status      String  // DeploymentStatus
+  startedAt   DateTime?
+  finishedAt  DateTime?
+  durationMs  Int?
+  logLines    Int     @default(0)
+  order       Int     @default(0)
+  deployment  Deployment @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+
+  @@index([deploymentId])
+}
+
+model DatabaseInstance {
+  id                String   @id @default(cuid())
+  name              String
+  kind              String // DatabaseKind
+  version           String
+  status            String   @default("stopped")
+  projectId         String?
+  host              String
+  port              Int      @default(5432)
+  storageGb         Int      @default(20)
+  usedGb            Float    @default(0)
+  connections       Int      @default(0)
+  maxConnections    Int      @default(200)
+  backupsEnabled    Boolean  @default(true)
+  region            String   @default("local")
+  dockerContainerId String?
+  createdAt         DateTime @default(now())
+  project           Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+}
+
+model Volume {
+  id              String  @id @default(cuid())
+  name            String
+  projectId       String?
+  mountPath       String  @default("/data")
+  sizeGb          Int     @default(20)
+  usedGb          Float   @default(0)
+  type            String  @default("ssd") // ssd | hdd | nfs
+  server          String  @default("local")
+  encrypted       Boolean @default(true)
+  dockerVolumeName String?
+  project         Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+}
+
+model Server {
+  id            String   @id @default(cuid())
+  name          String   @unique
+  hostname      String
+  ip            String
+  role          String   @default("worker") // manager | worker | standalone
+  status        String   @default("offline") // online | offline | degraded
+  os            String   @default("Ubuntu 24.04 LTS")
+  cpuCores      Int      @default(4)
+  memoryGb      Int      @default(16)
+  diskGb        Int      @default(200)
+  diskUsedGb    Int      @default(0)
+  dockerVersion String   @default("")
+  region        String   @default("local")
+  uptimeHours   Int      @default(0)
+  sshUser       String?
+  sshKeyId      String?
+  joinedAt      DateTime?
+  createdAt     DateTime @default(now())
+}
+
+model SshKey {
+  id        String   @id @default(cuid())
+  name      String
+  publicKey String
+  scope     String   @default("cluster") // cluster | repo
+  fingerprint String?
+  createdAt DateTime @default(now())
+}
+
+model Registry {
+  id        String   @id @default(cuid())
+  name      String
+  url       String
+  auth      String   @default("anonymous") // token | basic | anonymous
+  token     String?
+  username  String?
+  password  String?
+  createdAt DateTime @default(now())
+}
+
+model Webhook {
+  id        String   @id @default(cuid())
+  url       String
+  events    String   // JSON array of event names
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+}
+
+model ApiToken {
+  id         String   @id @default(cuid())
+  name       String
+  scope      String   @default("read") // read | deploy | admin
+  tokenHash  String   @unique
+  lastUsedAt DateTime?
+  createdAt  DateTime @default(now())
+  user       User?    @relation(fields: [userId], references: [id])
+  userId     String?
+}
+
+model BackupRecord {
+  id            String   @id @default(cuid())
+  target        String
+  targetKind    String   // database | volume | project
+  status        String   @default("running") // completed | running | failed | scheduled
+  sizeMb        Int      @default(0)
+  startedAt     DateTime @default(now())
+  finishedAt    DateTime?
+  durationMs    Int?
+  schedule      String?
+  retentionDays Int      @default(14)
+  server        String   @default("local")
+  projectId     String?
+  project       Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+}
+
+model BackupSchedule {
+  id            String   @id @default(cuid())
+  target        String
+  targetKind    String
+  schedule      String   // cron
+  retentionDays Int      @default(14)
+  active        Boolean  @default(true)
+  createdAt     DateTime @default(now())
+}
+
+model Notification {
   id        String   @id @default(cuid())
   title     String
-  content   String?
-  published Boolean  @default(false)
-  authorId  String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  body      String   @default("")
+  level     String   @default("info") // info | success | warning | error
+  kind      String   @default("system") // deploy | backup | ssl | server | security | system
+  read      Boolean  @default(false)
+  ts        DateTime @default(now())
+  projectId String?
+  project   Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+}
+
+model ActivityEvent {
+  id        String   @id @default(cuid())
+  ts        DateTime @default(now())
+  actor     String   @default("you")
+  kind      String   // deploy | rollback | scale | domain | database | backup | env | server
+  message   String
+  projectId String?
+  project   Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  userId    String?
+  user      User?     @relation(fields: [userId], references: [id])
+}
+
+model Integration {
+  id     String @id @default(cuid())
+  kind   String // slack | email | discord | pagerduty | telegram | teams
+  config String // JSON
+  active Boolean @default(true)
+}
+
+model MetricSample {
+  id         String   @id @default(cuid())
+  serviceId  String?
+  containerId String?
+  ts         DateTime @default(now())
+  cpu        Float    @default(0)
+  memory     Float    @default(0)
+  netIn      Float    @default(0)
+  netOut     Float    @default(0)
+  service     Service? @relation(fields: [serviceId], references: [id], onDelete: SetNull)
+}
+
+model Setting {
+  key   String @id
+  value String
+}
+
+// Capped ring buffer for simulated/non-Docker logs and persisted runtime logs.
+model LogLine {
+  id        String   @id @default(cuid())
+  ts        DateTime @default(now())
+  level     String   @default("info") // debug | info | warn | error | system
+  service   String   @default("app")
+  message   String
+  projectId String?
+  containerId String?
+
+  @@index([ts])
 }

@@ -16,7 +16,7 @@ import {
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
-import { useToast } from '@/hooks/use-toast'
+import { useToast, toast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
 
 export function CliDesktopView() {
@@ -35,6 +35,15 @@ export function CliDesktopView() {
           talk to the same Slipway API on your server, so anything you can do in the browser you can do from the
           terminal or the desktop.
         </p>
+      </div>
+
+      {/* Honest scope note */}
+      <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 text-[12px] text-muted-foreground leading-relaxed">
+        <strong className="text-foreground font-medium">What this build ships:</strong> the Slipway server, web dashboard,
+        and REST API (including Bearer-token auth for automation). The standalone CLI binary and the Tauri desktop app
+        are <strong className="text-foreground font-medium">not bundled</strong> with this self-hosted build — the install
+        commands and download buttons below describe the intended distribution, not files that exist today. Drive Slipway
+        from the web dashboard, or call the API directly with an API token (see Settings → Profile → API tokens).
       </div>
 
       {/* Three clients banner */}
@@ -185,7 +194,7 @@ function InstallSection({ activeOs, setActiveOs }: { activeOs: 'macos' | 'linux'
                 </div>
                 <div className="text-[11px] text-muted-foreground">{d.detail}</div>
                 <div className="text-[11px] text-muted-foreground font-mono mt-1">{d.file} · {d.size}</div>
-                <Button variant="outline" size="sm" className="mt-3 h-8 w-full gap-2" onClick={() => toast({ title: 'Download started', description: `${d.file} (${d.size}) downloading.` })}>
+                <Button variant="outline" size="sm" className="mt-3 h-8 w-full gap-2" onClick={() => toast({ title: 'No prebuilt binary', description: `${d.file} is not built in this release. Build the Tauri app from source, or use the web dashboard.`, variant: 'default' })}>
                   <Download size={11} />
                   Download
                 </Button>

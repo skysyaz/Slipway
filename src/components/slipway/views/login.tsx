@@ -23,21 +23,25 @@ export function LoginView() {
   const { login } = useAuth()
   const [username, setUsername] = React.useState('')
   const [password, setPassword] = React.useState('')
+  const [totp, setTotp] = React.useState('')
   const [error, setError] = React.useState('')
   const [submitting, setSubmitting] = React.useState(false)
 
-  const submit = (e: React.FormEvent) => {
+  const submit = async (e: React.FormEvent) => {
     e.preventDefault()
     setSubmitting(true)
     setError('')
-    // Small delay so the spinner is visible — feels like a real auth round-trip.
-    setTimeout(() => {
-      const result = login(username, password)
+    try {
+      const result = await login(username, password, totp.trim() || undefined)
       if (!result.ok) {
         setError(result.error || 'Login failed')
         setSubmitting(false)
       }
-    }, 350)
+      // on success, the session updates and page.tsx flips to the app
+    } catch {
+      setError('Login failed')
+      setSubmitting(false)
+    }
   }
 
   return (
@@ -133,6 +137,18 @@ export function LoginView() {
                 autoComplete="current-password"
                 className="h-10"
                 required
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="totp" className="text-[12px]">2FA code <span className="text-muted-foreground font-normal">(if enabled)</span></Label>
+              <Input
+                id="totp"
+                value={totp}
+                onChange={(e) => setTotp(e.target.value)}
+                placeholder="123456"
+                autoComplete="one-time-code"
+                inputMode="numeric"
+                className="h-10 font-mono"
               />
             </div>
 

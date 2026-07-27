@@ -22,7 +22,7 @@ import { Progress } from '@/components/ui/progress'
 import { useSlipway } from '@/lib/slipway/store'
 import { DbGlyph, StatusDot } from '../icons'
 import { TimeAgo, BytesShort } from '../format'
-import { useToast } from '@/hooks/use-toast'
+import { useToast, toast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
 
 export function DatabasesView() {

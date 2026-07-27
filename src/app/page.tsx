@@ -28,6 +28,18 @@ import { MobileNav } from '@/components/slipway/mobile-nav'
 function AppShell() {
   const view = useSlipway((s) => s.view)
   const selectedProjectId = useSlipway((s) => s.selectedProjectId)
+  const hydrate = useSlipway((s) => s.hydrate)
+  const refetchAll = useSlipway((s) => s.refetchAll)
+
+  // Hydrate from the API on mount, then poll for server-side progress (deploy
+  // progression, backups completing, notifications) every 4s.
+  React.useEffect(() => {
+    void hydrate()
+    const id = setInterval(() => {
+      void refetchAll()
+    }, 4000)
+    return () => clearInterval(id)
+  }, [hydrate, refetchAll])
 
   return (
     <div className="min-h-screen flex bg-background">

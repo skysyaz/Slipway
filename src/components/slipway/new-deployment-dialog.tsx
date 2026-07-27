@@ -52,7 +52,7 @@ const steps = ['Source', 'Detect', 'Configure', 'Review'] as const
 export function NewDeploymentDialog() {
   const open = useSlipway((s) => s.newDeploymentOpen)
   const setOpen = useSlipway((s) => s.setNewDeploymentOpen)
-  const triggerDeployment = useSlipway((s) => s.triggerDeployment)
+  const createAndDeploy = useSlipway((s) => s.createAndDeploy)
 
   const [step, setStep] = React.useState(0)
   const [source, setSource] = React.useState<Source>('git')
@@ -123,16 +123,36 @@ export function NewDeploymentDialog() {
   const next = () => setStep((s) => Math.min(steps.length - 1, s + 1))
   const back = () => setStep((s) => Math.max(0, s - 1))
 
-  const deploy = () => {
+  const deploy = async () => {
     setDeploying(true)
-    // simulate building pipeline
-    setTimeout(() => {
-      const newId = 'prj-new-' + Math.random().toString(36).slice(2, 8)
-      setDeployedProjectId(newId)
-      // also create a fresh deployment entry
-      triggerDeployment('prj-web') // reuse existing project for demo purposes so we have services to show
+    const stack = detectableStacks[detectedIdx]
+    // derive a project name from the domain or repo
+    const nameBase =
+      domain?.split('.')[0] ||
+      (source === 'git' ? repoUrl.split('/').pop() : source === 'folder' ? folderPath.split('/').pop() : composePath.split('/').slice(-2, -1)[0]) ||
+      'new-project'
+    try {
+      const created = await createAndDeploy({
+        name: nameBase,
+        source,
+        repoUrl: source === 'git' ? repoUrl : undefined,
+        branch: source === 'git' ? branch : undefined,
+        folderPath: source === 'folder' ? folderPath : undefined,
+        composePath: source === 'compose' ? composePath : undefined,
+        stack: stack.kind,
+        stackLabel: stack.label,
+        environment: env,
+        domain: domain || undefined,
+        ssl,
+        buildCmd: buildCmd || undefined,
+        startCmd: startCmd || undefined,
+      })
+      setDeployedProjectId(created ?? 'done')
+    } catch (e) {
+      console.error('deploy failed', e)
+    } finally {
       setDeploying(false)
-    }, 4200)
+    }
   }
 
   return (

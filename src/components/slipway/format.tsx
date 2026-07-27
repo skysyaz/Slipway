@@ -62,6 +62,15 @@ export function Percent({ value, className }: { value: number; className?: strin
   return <span className={cn('text-muted-foreground', className)}>{value.toFixed(1)}%</span>
 }
 
+// ponytail: metric buffers are empty until Docker samples arrive; guard the
+// "last point" read so empty series render "—" instead of crashing on undefined.
+export function lastV(data: { v: number }[] | undefined | null): number | undefined {
+  return data && data.length ? data[data.length - 1].v : undefined
+}
+export function lastN(data: number[] | undefined | null): number | undefined {
+  return data && data.length ? data[data.length - 1] : undefined
+}
+
 export function Sparkline({ data, color = 'oklch(0.7 0.17 158)', height = 32, width = 120 }: { data: number[]; color?: string; height?: number; width?: number }) {
   const id = React.useId()
   if (!data || data.length === 0) return null

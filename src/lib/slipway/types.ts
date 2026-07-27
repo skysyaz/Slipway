@@ -74,6 +74,14 @@ export interface Deployment {
   url?: string
 }
 
+export interface EnvVar {
+  id: string
+  key: string
+  value: string
+  scope: 'all' | 'production' | 'staging' | 'preview'
+  masked: boolean
+}
+
 export interface Project {
   id: string
   name: string
@@ -81,6 +89,7 @@ export interface Project {
   source: 'git' | 'folder' | 'compose'
   repoUrl?: string
   folderPath?: string
+  composePath?: string
   stack: StackKind
   stackLabel: string
   framework?: string
@@ -92,6 +101,7 @@ export interface Project {
   description?: string
   services: Service[]
   domains: Domain[]
+  envVars: EnvVar[]
   envVarsCount: number
   monthlyDeploys: number
   successRate: number // 0-100
@@ -99,8 +109,20 @@ export interface Project {
   memoryMb: number
   cpuMilli: number
   replicas: number
+  minReplicas: number
+  maxReplicas: number
   monorepo?: boolean
   monorepoPath?: string
+  // deploy policy
+  autoDeploy: boolean
+  requireTests: boolean
+  autoRollback: boolean
+  pauseDuringWindows: boolean
+  prPreviews: boolean
+  buildCmd?: string
+  startCmd?: string
+  paused: boolean
+  dockerImage?: string
 }
 
 export interface Service {
