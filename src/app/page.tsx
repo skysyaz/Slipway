@@ -75,7 +75,7 @@ function AppShell() {
       <div className="flex-1 flex flex-col min-w-0">
         <Topbar />
         <MobileNav />
-        <main className="flex-1 px-4 sm:px-6 py-5 max-w-[1600px] w-full mx-auto">
+        <main className="flex-1 px-4 sm:px-6 py-5 max-w-[1600px] w-full mx-auto min-w-0">
           {view === 'overview' && <OverviewView />}
           {view === 'projects' && <ProjectsView />}
           {view === 'databases' && <DatabasesView />}

@@ -134,6 +134,8 @@ interface SlipwayState {
   addServer: (input: Record<string, unknown>) => Promise<void>
   addService: (projectId: string, input: Record<string, unknown>) => Promise<void>
   restartService: (projectId: string, serviceId?: string) => Promise<void>
+  stopService: (projectId: string, serviceId?: string) => Promise<void>
+  removeService: (projectId: string, serviceId: string) => Promise<void>
   scaleProject: (projectId: string, replicas: number) => Promise<void>
   toggleEnvVar: (projectId: string, key: string, value: string) => Promise<void>
   addActivity: (kind: ActivityEvent['kind'], message: string, projectId?: string) => Promise<void>
@@ -555,6 +557,19 @@ export const useSlipway = create<SlipwayState>((set, get) => {
       ? `/api/projects/${projectId}/services/${serviceId}/restart`
       : `/api/projects/${projectId}/restart`
     await api.post(url)
+    await get().refetch(['projects', 'activity'])
+  },
+
+  stopService: async (projectId, serviceId) => {
+    const url = serviceId
+      ? `/api/projects/${projectId}/services/${serviceId}/stop`
+      : `/api/projects/${projectId}/pause`
+    await api.post(url)
+    await get().refetch(['projects', 'activity'])
+  },
+
+  removeService: async (projectId, serviceId) => {
+    await api.del(`/api/projects/${projectId}/services/${serviceId}`)
     await get().refetch(['projects', 'activity'])
   },
 

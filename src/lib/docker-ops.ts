@@ -1166,6 +1166,26 @@ export async function realRestart(
   })
 }
 
+export async function stopService(
+  projectId: string,
+  serviceId: string | undefined,
+  actor = "you"
+): Promise<void> {
+  const docker = await getDocker()
+  const service = await db.service.findUnique({ where: { id: serviceId }, select: { dockerContainerId: true, name: true } })
+  if (!service) throw new Error("Service not found")
+  if (!service.dockerContainerId) {
+    throw new Error(`Service "${service.name}" has no container to stop (deploy the project first).`)
+  }
+  try {
+    await docker.getContainer(service.dockerContainerId).stop()
+  } catch {
+    /* already stopped or gone — the desired end state either way */
+  }
+  await db.service.update({ where: { id: serviceId }, data: { status: "stopped" } })
+  await recordActivity("scale", `stopped service ${service.name}`, { projectId, actor })
+}
+
 export async function realStop(projectId: string, actor = "you"): Promise<void> {
   const docker = await getDocker()
   const project = await db.project.findUnique({ where: { id: projectId }, select: { name: true } })
