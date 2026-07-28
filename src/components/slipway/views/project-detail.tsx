@@ -1020,10 +1020,20 @@ function SettingsTab({ project }: { project: Project }) {
   }
   const del = async () => {
     if (!window.confirm(`Delete ${project.name}? This cannot be undone.`)) return
-    await api.del(`/api/projects/${project.id}`)
-    toast({ title: 'Project deleted', description: `${project.name} and all its resources removed.`, variant: 'destructive' })
-    setView('projects')
-    await refetch(['projects', 'activity'])
+    // ponytail: await the persistence-layer delete FIRST and confirm it
+    // committed before touching UI state. The previous version navigated away +
+    // toasted success unconditionally; if the API failed (or the row wasn't
+    // actually deleted server-side) the project reappeared on refresh with a
+    // "deleted" toast already shown. Now a failure keeps you on the page with an
+    // honest error toast — no fake success.
+    try {
+      await api.del(`/api/projects/${project.id}`)
+      toast({ title: 'Project deleted', description: `${project.name} and all its resources removed.`, variant: 'destructive' })
+      setView('projects')
+      await refetch(['projects', 'activity'])
+    } catch (e) {
+      toast({ title: 'Delete failed', description: e instanceof ApiError ? e.message : 'the project was not deleted — it is still in the database.', variant: 'destructive' })
+    }
   }
 
   return (

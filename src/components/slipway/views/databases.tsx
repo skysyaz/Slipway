@@ -18,6 +18,9 @@ import {
   Pencil,
   Trash2,
   Loader2,
+  Zap,
+  CheckCircle2,
+  AlertTriangle,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -253,6 +256,12 @@ function DatabaseActions({ db }: { db: DatabaseInstance }) {
   const [busy, setBusy] = React.useState(false)
 
   const [creds, setCreds] = React.useState<{ username?: string; password?: string; dbName?: string; connectionString?: string; externalConnectionString?: string; note?: string } | null>(null)
+  // ponytail: bug 1 — Test Connection runs the engine's ping inside the DB
+  // container (server classifies init/permission/disk-full failures from the
+  // logs when it's down). Result is shown inline with a friendly hint; the
+  // button is just re-clickable for retry. No fake "connected".
+  const [testing, setTesting] = React.useState(false)
+  const [testResult, setTestResult] = React.useState<{ ok: boolean; latencyMs?: number; state?: string; error?: string; hint?: string } | null>(null)
   const [editName, setEditName] = React.useState(db.name)
   // ponytail: Radix <SelectItem> forbids value="" (it reserves "" to clear the
   // selection / show the placeholder), so model "no project" as a sentinel and
@@ -271,11 +280,25 @@ function DatabaseActions({ db }: { db: DatabaseInstance }) {
   const showCreds = async () => {
     setCredsOpen(true)
     setCreds(null)
+    setTestResult(null)
     try {
       const c = await api.get<{ username?: string; password?: string; dbName?: string; connectionString?: string; externalConnectionString?: string; note?: string }>(`/api/databases/${db.id}/credentials`)
       setCreds(c)
     } catch (e) {
       toast({ title: 'Could not load credentials', description: (e as Error).message, variant: 'destructive' })
+    }
+  }
+
+  const runTest = async () => {
+    setTesting(true)
+    setTestResult(null)
+    try {
+      const r = await api.post<{ ok: boolean; latencyMs?: number; state?: string; error?: string; hint?: string }>(`/api/databases/${db.id}/test-connection`)
+      setTestResult(r)
+    } catch (e) {
+      setTestResult({ ok: false, error: e instanceof ApiError ? e.message : 'could not run the connection test' })
+    } finally {
+      setTesting(false)
     }
   }
 
@@ -383,6 +406,27 @@ function DatabaseActions({ db }: { db: DatabaseInstance }) {
                 <CredLine label="External (from outside server)" value={creds.externalConnectionString} mono />
               )}
               {creds.note && <p className="text-[11px] text-amber-600 leading-snug pt-1">{creds.note}</p>}
+              <div className="pt-2 border-t border-border mt-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-[11px] text-muted-foreground">Connection test</div>
+                  <Button variant="outline" size="sm" className="h-7 gap-2 text-[11px]" disabled={testing || !db.dockerContainerId} onClick={() => void runTest()}>
+                    {testing ? <Loader2 size={11} className="animate-spin" /> : <Zap size={11} />}
+                    {testing ? 'Testing…' : 'Test connection'}
+                  </Button>
+                </div>
+                {testResult && (
+                  <div className={cn('mt-2 rounded-md border px-2.5 py-2 text-[11px] leading-snug', testResult.ok ? 'border-emerald-500/30 bg-emerald-500/5 text-emerald-600' : 'border-rose-500/30 bg-rose-500/5 text-rose-600')}>
+                    <div className="flex items-center gap-1.5 font-medium">
+                      {testResult.ok ? <CheckCircle2 size={12} /> : <AlertTriangle size={12} />}
+                      {testResult.ok ? `Connected${testResult.latencyMs != null ? ` · ${testResult.latencyMs}ms` : ''}` : testResult.error || 'Connection failed'}
+                    </div>
+                    {testResult.hint && <p className="mt-1 text-[10.5px] text-muted-foreground">{testResult.hint}</p>}
+                  </div>
+                )}
+                {!db.dockerContainerId && (
+                  <p className="mt-1 text-[10.5px] text-muted-foreground">No real container for this database — nothing to test.</p>
+                )}
+              </div>
             </div>
           )}
         </DialogContent>

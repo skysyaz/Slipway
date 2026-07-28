@@ -139,7 +139,10 @@ function ProjectCard({ project, onClick }: { project: Project; onClick: () => vo
   return (
     <button
       onClick={onClick}
-      className="text-left rounded-xl border border-border bg-card hover:border-muted-foreground/40 hover:shadow-md transition-all p-4 group"
+      // ponytail: bug 3 — scope the transition to shadow + border-color only.
+      // `transition-all` animates layout-affecting properties on a big card grid
+      // (a re-render storm source); transform/opacity-style props are all we keep.
+      className="text-left rounded-xl border border-border bg-card hover:border-muted-foreground/40 hover:shadow-md transition-[box-shadow,border-color] p-4 group"
     >
       <div className="flex items-start gap-3">
         <StackGlyph stack={project.stack} size={36} />

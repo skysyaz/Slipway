@@ -8,18 +8,23 @@ import { RollbackDialog } from '@/components/slipway/rollback-dialog'
 import { AllDialogs, AddServiceDialog } from '@/components/slipway/action-dialogs'
 import { OverviewView } from '@/components/slipway/views/overview'
 import { ProjectsView } from '@/components/slipway/views/projects'
-import { ProjectDetailView } from '@/components/slipway/views/project-detail'
-import { DeploymentsView } from '@/components/slipway/views/deployments'
 import { DatabasesView } from '@/components/slipway/views/databases'
-import { StorageView } from '@/components/slipway/views/storage'
-import { DomainsView } from '@/components/slipway/views/domains'
-import { MetricsView } from '@/components/slipway/views/metrics'
-import { LogsView } from '@/components/slipway/views/logs'
-import { BackupsView } from '@/components/slipway/views/backups'
-import { PreviewsView } from '@/components/slipway/views/previews'
-import { SettingsView } from '@/components/slipway/views/settings'
-import { CliDesktopView } from '@/components/slipway/views/cli-desktop'
 import { LoginView } from '@/components/slipway/views/login'
+// ponytail: bug 3 — code-split the heavy secondary views. Overview / projects /
+// databases stay eager (first paint + where most fixes live); the rest are
+// React.lazy chunks fetched on first visit. Suspense sits on the view switch
+// only, so the shell (sidebar/topbar/dialogs) stays mounted outside it and the
+// transition into a lazy view doesn't re-mount the whole app.
+const ProjectDetailView = React.lazy(() => import('@/components/slipway/views/project-detail').then((m) => ({ default: m.ProjectDetailView })))
+const DeploymentsView = React.lazy(() => import('@/components/slipway/views/deployments').then((m) => ({ default: m.DeploymentsView })))
+const StorageView = React.lazy(() => import('@/components/slipway/views/storage').then((m) => ({ default: m.StorageView })))
+const DomainsView = React.lazy(() => import('@/components/slipway/views/domains').then((m) => ({ default: m.DomainsView })))
+const MetricsView = React.lazy(() => import('@/components/slipway/views/metrics').then((m) => ({ default: m.MetricsView })))
+const LogsView = React.lazy(() => import('@/components/slipway/views/logs').then((m) => ({ default: m.LogsView })))
+const BackupsView = React.lazy(() => import('@/components/slipway/views/backups').then((m) => ({ default: m.BackupsView })))
+const PreviewsView = React.lazy(() => import('@/components/slipway/views/previews').then((m) => ({ default: m.PreviewsView })))
+const SettingsView = React.lazy(() => import('@/components/slipway/views/settings').then((m) => ({ default: m.SettingsView })))
+const CliDesktopView = React.lazy(() => import('@/components/slipway/views/cli-desktop').then((m) => ({ default: m.CliDesktopView })))
 import { useSlipway } from '@/lib/slipway/store'
 import { useAuth } from '@/components/slipway/auth-provider'
 import { CommandPalette } from '@/components/slipway/command-palette'
@@ -71,17 +76,19 @@ function AppShell() {
         <main className="flex-1 px-4 sm:px-6 py-5 max-w-[1600px] w-full mx-auto">
           {view === 'overview' && <OverviewView />}
           {view === 'projects' && <ProjectsView />}
-          {view === 'project-detail' && <ProjectDetailView />}
-          {view === 'deployments' && <DeploymentsView />}
           {view === 'databases' && <DatabasesView />}
-          {view === 'storage' && <StorageView />}
-          {view === 'domains' && <DomainsView />}
-          {view === 'metrics' && <MetricsView />}
-          {view === 'logs' && <LogsView />}
-          {view === 'backups' && <BackupsView />}
-          {view === 'previews' && <PreviewsView />}
-          {view === 'settings' && <SettingsView />}
-          {view === 'cli' && <CliDesktopView />}
+          <React.Suspense fallback={<div className="flex items-center justify-center py-12"><span className="text-[12px] text-muted-foreground">Loading…</span></div>}>
+            {view === 'project-detail' && <ProjectDetailView />}
+            {view === 'deployments' && <DeploymentsView />}
+            {view === 'storage' && <StorageView />}
+            {view === 'domains' && <DomainsView />}
+            {view === 'metrics' && <MetricsView />}
+            {view === 'logs' && <LogsView />}
+            {view === 'backups' && <BackupsView />}
+            {view === 'previews' && <PreviewsView />}
+            {view === 'settings' && <SettingsView />}
+            {view === 'cli' && <CliDesktopView />}
+          </React.Suspense>
         </main>
         <footer className="mt-auto border-t border-border py-4 px-6 text-[11px] text-muted-foreground flex items-center justify-between flex-wrap gap-2">
           <div className="flex items-center gap-3">

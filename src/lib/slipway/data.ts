@@ -17,10 +17,14 @@ export function dbMeta(kind: string): { label: string; color: string } {
 }
 
 // Full version lists for each database engine, latest first.
-// Updated July 2026 — covers every major release still in support, plus
-// the most recent few EOL versions for legacy migrations.
+// ponytail: SINGLE source of truth for the New-Database dialog (action-dialogs
+// reads databaseVersions[kind] + latestDbVersion(kind)). Bumped July 2026:
+// PostgreSQL 18 is now the latest major (released Sep 2025); 17.x / 16.x /
+// 15.x remain selectable for legacy installs. The first element of each list is
+// the "latest" the form defaults to + gets the "latest" badge.
 export const databaseVersions: Record<string, string[]> = {
   postgres: [
+    '18.0',
     '17.2', '17.1', '17.0',
     '16.6', '16.4', '16.2', '16.0',
     '15.10', '15.8', '15.6', '15.4', '15.2', '15.0',

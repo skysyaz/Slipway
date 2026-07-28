@@ -569,15 +569,32 @@ export async function realStop(projectId: string, actor = "you"): Promise<void> 
 }
 
 export async function realRemove(projectId: string, actor = "you"): Promise<void> {
-  const docker = await getDocker()
-  const ids = await projectContainerIds(projectId)
-  for (const id of ids) {
-    try {
-      await docker.getContainer(id).remove({ force: true })
-    } catch {
-      /* ignore */
+  // ponytail: delete the PROJECT ROW, not just the container. The previous
+  // version only `docker rm`'d the containers and returned — the Project row (and
+  // its services/domains/envVars) stayed in SQLite, so the app reappeared after
+  // every refresh. That was the "delete says success but it comes back" bug:
+  // the DELETE route returned {ok:true} even though the row was never touched.
+  //
+  // Container removal is best-effort (Docker may be down, the container may
+  // already be gone) and must NOT block the row deletion — deleting the project
+  // is the real delete. The schema cascades Service/Domain/EnvVar and SetNulls
+  // Deployment/Volume/Notification/Activity (kept as history), so one
+  // db.project.delete cleans everything.
+  try {
+    const docker = await getDocker()
+    const ids = await projectContainerIds(projectId)
+    for (const id of ids) {
+      try {
+        await docker.getContainer(id).remove({ force: true })
+      } catch {
+        /* container already gone / swarm-managed — ignore */
+      }
     }
+  } catch {
+    /* Docker engine down — still delete the row; the container is orphaned */
   }
+  await db.project.delete({ where: { id: projectId } })
+  await recordActivity("deploy", `deleted project "${projectId}"`, { actor })
   void actor
 }
 
@@ -836,6 +853,154 @@ export async function realSetDatabaseCredentials(
     { actor }
   )
   return { username, password: newPass }
+}
+
+// Test a real connection to a managed database. If the container is running,
+// `docker exec` the engine's ping (pg_isready / mysqladmin ping / redis-cli
+// ping / mongosh ping / sqlcmd SELECT 1) inside it and report ok + latency. If
+// the container ISN'T running (crash-loop, init failure, exited), pull the
+// logs and classify the failure into friendly, actionable guidance — e.g.
+// "could not write init file" → read-only data dir / wrong ownership / disk
+// full — instead of surfacing a raw dump. Honest: returns ok=false + a hint,
+// never claims success for a down DB. (bug 1)
+export async function realTestDatabaseConnection(
+  dbId: string
+): Promise<{
+  ok: boolean
+  latencyMs?: number
+  state?: string
+  error?: string
+  hint?: string
+  raw?: string
+}> {
+  const row = await db.databaseInstance.findUnique({ where: { id: dbId } })
+  if (!row) throw new Error("Database not found")
+  if (!row.dockerContainerId) {
+    return {
+      ok: false,
+      error: "No real container for this database",
+      hint: "This is an imported/stub row with no container to test. Provision a managed database, or reach an imported DB from a container on the same Docker network.",
+    }
+  }
+  let docker: Docker
+  try {
+    docker = await getDocker()
+  } catch {
+    return { ok: false, error: "Docker engine unavailable", hint: "Start Docker on the host and retry." }
+  }
+  const c = docker.getContainer(row.dockerContainerId)
+  let info: { State?: { Running?: boolean; Status?: string; Restarting?: boolean } }
+  try {
+    info = await c.inspect()
+  } catch (e) {
+    return { ok: false, error: "Container not found", hint: `The container for this database is gone. ${(e as Error).message}` }
+  }
+  if (info.State?.Running !== true) {
+    let logTail = ""
+    try {
+      logTail = (await c.logs({ stdout: true, stderr: true, follow: false })).toString("utf8").slice(-600)
+    } catch {
+      /* ignore */
+    }
+    const cls = classifyDbError(logTail)
+    return {
+      ok: false,
+      state: info.State?.Restarting ? "restarting" : info.State?.Status || "exited",
+      error: cls.error,
+      hint: cls.hint,
+      raw: logTail.slice(-200),
+    }
+  }
+
+  const engine = ENGINE_SPECS[row.kind]
+  if (!engine) return { ok: false, error: `Unsupported engine: ${row.kind}` }
+  const user = row.username ?? engine.defaultUser ?? ""
+  const pass = row.password ?? ""
+  const port = String(engine.internalPort)
+  let cmd: string[]
+  switch (row.kind) {
+    case "postgres":
+      cmd = ["pg_isready", "-h", "127.0.0.1", "-p", port, "-U", user]
+      break
+    case "mysql":
+    case "mariadb":
+      cmd = ["mysqladmin", "ping", "-h", "127.0.0.1", "--protocol=tcp", "-u", "root", `-p${pass}`]
+      break
+    case "mongodb":
+      cmd = ["mongosh", "--quiet", "-u", user || "root", "-p", pass, "--authenticationDatabase", "admin", "--eval", "db.adminCommand({ping:1}).ok"]
+      break
+    case "redis":
+      cmd = ["redis-cli", "-a", pass, "ping"]
+      break
+    case "valkey":
+      cmd = ["valkey-cli", "-a", pass, "ping"]
+      break
+    case "mssql":
+      cmd = ["/opt/mssql-tools18/bin/sqlcmd", "-S", "127.0.0.1", "-U", "sa", "-P", `${pass}Aa1!`, "-C", "-Q", "SELECT 1"]
+      break
+    default:
+      return { ok: false, error: `No ping command for ${row.kind}` }
+  }
+  const t0 = Date.now()
+  let res: { exitCode: number; output: string }
+  try {
+    res = await execInContainer(docker, row.dockerContainerId, cmd)
+  } catch (e) {
+    return { ok: false, error: "Ping command failed to run", hint: (e as Error).message, latencyMs: Date.now() - t0 }
+  }
+  const latencyMs = Date.now() - t0
+  const ok = res.exitCode === 0
+  return {
+    ok,
+    latencyMs,
+    state: "running",
+    error: ok ? undefined : res.output.slice(0, 200) || `engine ping exited with code ${res.exitCode}`,
+    hint: ok
+      ? undefined
+      : "The container is up but the engine isn't accepting connections yet (still initializing?) — retry in a few seconds. If it persists, inspect the container logs on the host (`docker logs <db>`).",
+  }
+}
+
+// Map an engine's crash-loop log tail to a friendly, actionable message. The
+// raw "FATAL: could not write init file (SQLSTATE XX000)" a Postgres prints when
+// its data dir isn't writable is meaningless to a dashboard user; this turns it
+// into "check the data directory ownership / disk space / volume mount".
+function classifyDbError(logTail: string): { error: string; hint: string } {
+  const t = logTail.toLowerCase()
+  if (/could not write init file|could not write|read-only file system|readonly|permission denied|operation not permitted|could not create directory/.test(t)) {
+    return {
+      error: "The database can't write to its data directory (init / permission error).",
+      hint: "The data directory or volume mount is read-only or owned by the wrong user. On the host run `df -h` (disk full?), then check the volume mount + data-directory ownership — the engine user (e.g. `postgres`) must own it. For Docker: `docker volume ls`, inspect the bind/volume, and `docker exec <db> ls -la <datadir>`. Recreate the database with a fresh empty volume if the volume is corrupted.",
+    }
+  }
+  if (/no space left|enospc|disk full|write.*failed.*space/.test(t)) {
+    return {
+      error: "The host disk is full — the database can't initialize.",
+      hint: "Run `df -h` on the server and free space (e.g. `docker system prune`), then restart or recreate the database. Slipway won't fake a 'running' state when the disk is full.",
+    }
+  }
+  if (/database disk image is malformed|corrupt|inconsistent/.test(t)) {
+    return {
+      error: "The database data directory is corrupted.",
+      hint: "The volume's data is unusable. Delete the database with 'also delete the data volume' and provision a fresh one.",
+    }
+  }
+  if (/role .* does not exist|authentication failed|password authentication failed|access denied|logon failed|login failed/.test(t)) {
+    return {
+      error: "Authentication failed — the stored credentials don't match the database.",
+      hint: "Rotate the credentials from the ⋯ menu (Set / rotate password), or recreate the database.",
+    }
+  }
+  if (/connection refused|not accepting connections|failed to bind|address already in use|port .* already allocated/.test(t)) {
+    return {
+      error: "The database engine isn't listening (port conflict or still starting).",
+      hint: "Check for a port conflict (`docker port <db>`), wait a few seconds for the engine to finish starting, and retry. A crash-loop will keep restarting — inspect the logs.",
+    }
+  }
+  return {
+    error: "The database container exited unexpectedly.",
+    hint: "Inspect the container logs on the host: `docker logs <db-container>`. Common causes: bad env vars, an incompatible image version, or a corrupted data volume.",
+  }
 }
 
 export async function realScale(
@@ -1307,12 +1472,21 @@ function statusFromState(state: string): string {
 // { hostname, tls } pairs. A rule can be `Host(\`a.com\`) && Host(\`b.com\`)` or
 // `HostRegexp` etc.; we extract every `Host(\`x\`)` occurrence. tls is on when
 // any router for the container has `traefik.http.routers.<r>.tls` set.
+// ponytail: the router NAME must be discovered from the `.rule` label too, not
+// just the bare `traefik.http.routers.<r>` enable label. Real Traefik setups
+// usually define a router by its `.rule` (and `.tls`) labels WITHOUT a bare
+// enable label, so the old matcher found zero routers and the scan surfaced no
+// domains — the "existing servers/domains with SSL don't appear" bug.
 function detectTraefikDomains(labels: Record<string, string>): { hostname: string; tls: boolean }[] {
   const routerNames = new Set<string>()
   const tlsRouter = new Set<string>()
   for (const k of Object.keys(labels)) {
+    // bare enable label: traefik.http.routers.<r>
     const m = k.match(/^traefik\.http\.routers\.([^.]+)$/)
     if (m) routerNames.add(m[1])
+    // the rule label itself: traefik.http.routers.<r>.rule  (the common case)
+    const rm = k.match(/^traefik\.http\.routers\.([^.]+)\.rule$/)
+    if (rm) routerNames.add(rm[1])
     const tm = k.match(/^traefik\.http\.routers\.([^.]+)\.tls$/)
     if (tm) tlsRouter.add(tm[1])
   }
@@ -1336,16 +1510,23 @@ export async function realScanHost(actor = "you"): Promise<{
   projects: number
   databases: number
   volumes: number
+  domains: number
   skipped: number
 }> {
   const docker = await getDocker()
-  const result = { projects: 0, databases: 0, volumes: 0, skipped: 0 }
+  const result = { projects: 0, databases: 0, volumes: 0, domains: 0, skipped: 0 }
 
   // --- containers ---
   const containers = await docker.listContainers({ all: true })
-  const existingProjectContainers = new Set(
-    (await db.project.findMany({ where: { dockerContainerId: { not: null } }, select: { dockerContainerId: true } }))
-      .map((p) => p.dockerContainerId as string)
+  // ponytail: map imported container id -> project id. The old scan SKIPPED
+  // already-imported containers entirely, so a second scan (or one run after
+  // Traefik labels were added) never discovered their domains — "existing
+  // servers/domains with SSL don't appear." Now we re-scan domains for already
+  // imported projects too (deduped against existing Domain rows), and only skip
+  // importing a duplicate project row.
+  const existingProjectByContainer = new Map<string, string>(
+    (await db.project.findMany({ where: { dockerContainerId: { not: null } }, select: { id: true, dockerContainerId: true } }))
+      .map((p) => [p.dockerContainerId as string, p.id] as [string, string])
   )
   const existingDbContainers = new Set(
     (await db.databaseInstance.findMany({ where: { dockerContainerId: { not: null } }, select: { dockerContainerId: true } }))
@@ -1354,11 +1535,46 @@ export async function realScanHost(actor = "you"): Promise<{
 
   for (const c of containers) {
     const name = (c.Names?.[0] || "").replace(/^\//, "")
-    // skip Slipway-managed + already-imported
-    if (name.startsWith("slipway-") || existingProjectContainers.has(c.Id) || existingDbContainers.has(c.Id)) {
+    // skip Slipway-managed containers + already-imported DATABASE containers
+    // (databases are imported once; re-scanning them is pointless and would
+    // create duplicate rows).
+    if (name.startsWith("slipway-") || existingDbContainers.has(c.Id)) {
       result.skipped++
       continue
     }
+    const labels = c.Labels || {}
+    const domains = detectTraefikDomains(labels)
+
+    // already-imported PROJECT container: don't re-import, but DO re-scan its
+    // domains (merge/dedupe). This is the fix for "existing domains don't
+    // appear" — labels added after the first import are now picked up.
+    const existingProjectId = existingProjectByContainer.get(c.Id)
+    if (existingProjectId) {
+      if (domains.length) {
+        const existingHosts = new Set(
+          (await db.domain.findMany({ where: { projectId: existingProjectId }, select: { hostname: true } }))
+            .map((d) => d.hostname)
+        )
+        for (const d of domains) {
+          if (!existingHosts.has(d.hostname)) {
+            await db.domain.create({
+              data: {
+                projectId: existingProjectId,
+                hostname: d.hostname,
+                type: "primary",
+                ssl: d.tls ? "managed" : "disabled",
+                https: d.tls,
+                status: "active",
+              },
+            })
+            result.domains++
+          }
+        }
+      }
+      result.skipped++
+      continue
+    }
+
     const image = c.Image || ""
     const dbKind = detectDbKind(image)
     // ponytail: record the ACTUAL published host port. When the container
@@ -1415,7 +1631,6 @@ export async function realScanHost(actor = "you"): Promise<{
       // `traefik.http.routers.<r>.rule=Host(\`x\`)` + `*.tls` labels off each
       // container — so reading the same labels is the honest way to surface
       // imported domains. (Caddy/proxy-manager readers are a follow-up.)
-      const domains = detectTraefikDomains(c.Labels || {})
       for (const d of domains) {
         await db.domain.create({
           data: {
@@ -1427,6 +1642,7 @@ export async function realScanHost(actor = "you"): Promise<{
             status: "active",
           },
         })
+        result.domains++
       }
     }
   }
@@ -1455,14 +1671,14 @@ export async function realScanHost(actor = "you"): Promise<{
     result.volumes++
   }
 
-  await recordActivity("system", `scanned host: imported ${result.projects} app(s), ${result.databases} database(s), ${result.volumes} volume(s)`, { actor })
+  await recordActivity("system", `scanned host: imported ${result.projects} app(s), ${result.databases} database(s), ${result.volumes} volume(s), ${result.domains} domain(s)`, { actor })
   await emit(
     "system",
     "system",
-    `host scan imported ${result.projects} app(s), ${result.databases} database(s), ${result.volumes} volume(s)`,
+    `host scan imported ${result.projects} app(s), ${result.databases} database(s), ${result.volumes} volume(s), ${result.domains} domain(s)`,
     {
       title: "Host scan complete",
-      body: `Imported ${result.projects + result.databases + result.volumes} existing resource(s) (${result.skipped} already managed).`,
+      body: `Found ${result.projects + result.databases + result.volumes + result.domains} resource(s): ${result.projects} app(s), ${result.databases} database(s), ${result.volumes} volume(s), ${result.domains} domain(s) (${result.skipped} already managed).`,
       level: "success",
       kind: "system",
     },

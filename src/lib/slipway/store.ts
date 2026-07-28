@@ -126,7 +126,7 @@ interface SlipwayState {
   reconcileProject: (projectId: string) => Promise<void>
   runBackup: (target: string, targetKind: BackupRecord['targetKind']) => Promise<void>
   addBackupSchedule: (target: string, schedule: string, retentionDays: number) => Promise<void>
-  scanHost: () => Promise<{ projects: number; databases: number; volumes: number; skipped: number }>
+  scanHost: () => Promise<{ projects: number; databases: number; volumes: number; domains: number; skipped: number }>
   addServer: (input: Record<string, unknown>) => Promise<void>
   addService: (projectId: string, input: Record<string, unknown>) => Promise<void>
   restartService: (projectId: string, serviceId?: string) => Promise<void>
@@ -445,7 +445,9 @@ export const useSlipway = create<SlipwayState>((set, get) => ({
   },
 
   scanHost: async () => {
-    const result = await api.post<{ projects: number; databases: number; volumes: number; skipped: number }>('/api/cluster/scan')
+    const result = await api.post<{ projects: number; databases: number; volumes: number; domains: number; skipped: number }>('/api/cluster/scan')
+    // ponytail: refetch projects (domains are nested on the serialized project)
+    // so newly-discovered + re-scanned domains render in the Domains view.
     await get().refetch(['projects', 'databases', 'volumes', 'activity', 'notifications'])
     return result
   },

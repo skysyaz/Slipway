@@ -1,20 +1,49 @@
 'use client'
 
 import * as React from 'react'
-import { Globe, Plus, ShieldCheck, ExternalLink, MoreHorizontal, ArrowRight, RefreshCw } from 'lucide-react'
+import { Globe, Plus, ShieldCheck, ExternalLink, MoreHorizontal, ArrowRight, RefreshCw, Loader2, Search } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { useSlipway } from '@/lib/slipway/store'
 import { StatusDot, StackGlyph } from '../icons'
 import { TimeAgo } from '../format'
 import { useToast } from '@/hooks/use-toast'
+import { ApiError } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
 export function DomainsView() {
   const projects = useSlipway((s) => s.projects)
   const selectProject = useSlipway((s) => s.selectProject)
   const setNewDomainOpen = useSlipway((s) => s.setNewDomainOpen)
+  const scanHost = useSlipway((s) => s.scanHost)
   const { toast } = useToast()
+
+  // ponytail: scan loading + last result feedback. The old Domains view had no
+  // scan trigger at all — running a scan from elsewhere returned silently and
+  // the user saw an empty list with no indication of what (if anything) was
+  // found. Now the scan is awaited here, the list it writes to (projects →
+  // p.domains, the SAME source this view renders from) is refetched, and the
+  // toast names exactly how many domains/servers were found (0 is shown
+  // honestly, not silently).
+  const [scanning, setScanning] = React.useState(false)
+  const [lastResult, setLastResult] = React.useState<{ domains: number; projects: number; databases: number; volumes: number } | null>(null)
+
+  const runScan = async () => {
+    setScanning(true)
+    setLastResult(null)
+    try {
+      const r = await scanHost()
+      setLastResult({ domains: r.domains, projects: r.projects, databases: r.databases, volumes: r.volumes })
+      toast({
+        title: 'Scan complete',
+        description: `Found ${r.domains} domain(s), ${r.projects} app(s), ${r.databases} database(s), ${r.volumes} volume(s).`,
+      })
+    } catch (e) {
+      toast({ title: 'Scan failed', description: e instanceof ApiError ? e.message : 'could not scan the host.', variant: 'destructive' })
+    } finally {
+      setScanning(false)
+    }
+  }
 
   const allDomains = projects.flatMap((p) => p.domains.map((d) => ({ ...d, project: p })))
 
@@ -34,11 +63,30 @@ export function DomainsView() {
             {expiringSoon.length} renewing within 30 days
           </p>
         </div>
-        <Button size="sm" className="h-9 gap-2" onClick={() => setNewDomainOpen(true)}>
-          <Plus size={13} />
-          Add domain
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" className="h-9 gap-2" disabled={scanning} onClick={() => void runScan()}>
+            {scanning ? <Loader2 size={13} className="animate-spin" /> : <Search size={13} />}
+            {scanning ? 'Scanning…' : 'Scan host for domains'}
+          </Button>
+          <Button size="sm" className="h-9 gap-2" onClick={() => setNewDomainOpen(true)}>
+            <Plus size={13} />
+            Add domain
+          </Button>
+        </div>
       </div>
+
+      {/* ponytail: honest feedback after a scan — "Found N domains" (or 0), so a
+          silent empty result is never confused with "scan didn't run". Disappears
+          once you add a domain or navigate away. */}
+      {lastResult && (
+        <div className="rounded-lg border border-border bg-muted/30 px-3 py-2 text-[12px] text-muted-foreground flex items-center gap-2">
+          <ShieldCheck size={13} className="text-emerald-500 shrink-0" />
+          <span>
+            Last scan found <b className="text-foreground">{lastResult.domains}</b> domain(s) from <b className="text-foreground">{lastResult.projects}</b> app container(s).
+            {lastResult.domains === 0 && ' No Traefik Host(`…`) labels detected on the host\'s containers — add routing labels to surface domains here.'}
+          </span>
+        </div>
+      )}
 
       {/* SSL banner */}
       <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-4 flex items-start gap-3">
