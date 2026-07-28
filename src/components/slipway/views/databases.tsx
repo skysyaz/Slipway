@@ -68,6 +68,7 @@ import { TimeAgo, BytesShort } from '../format'
 import { useToast, toast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
 import type { DatabaseInstance } from '@/lib/slipway/types'
+import { envKey } from '@/lib/slipway/types'
 
 export function DatabasesView() {
   const databases = useSlipway((s) => s.databases)
@@ -84,7 +85,7 @@ export function DatabasesView() {
   const filtered = React.useMemo(
     () =>
       databases.filter((d) => {
-        if (env !== 'all' && d.environment !== env) return false
+        if (env !== 'all' && envKey(d.environment) !== envKey(env)) return false
         if (!query) return true
         return d.name.includes(query) || d.kind.includes(query)
       }),

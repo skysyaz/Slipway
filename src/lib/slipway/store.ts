@@ -18,6 +18,7 @@ import type {
   Domain,
   MetricPoint,
 } from './types'
+import { envKey } from './types'
 
 const EMPTY: MetricPoint[] = []
 
@@ -238,6 +239,27 @@ function writeHash(view: NavView, projectId: string | null) {
   if (window.location.hash !== hash) window.location.hash = hash
 }
 
+// ponytail: the env filter is a URL query param (?env=production|staging|preview;
+// absent = 'all') so it is the SINGLE source of truth — the dropdown highlight,
+// every filtered list, and the summary all read from it, so they can never drift
+// (the bug: the dropdown set a store value the Deployments list never read).
+// URL source-of-truth also gives refresh-persistence + shareable links for free,
+// matching the hash-routing nav fix. pushState (not replaceState) so Back/Forward
+// traverses env selections; the popstate listener below syncs URL → store.
+const ENV_SET: ReadonlySet<string> = new Set<string>(['production', 'staging', 'preview'])
+function parseEnvParam(): Environment | 'all' {
+  if (typeof window === 'undefined') return 'all'
+  const v = envKey(new URLSearchParams(window.location.search).get('env'))
+  return ENV_SET.has(v) ? (v as Environment) : 'all'
+}
+function writeEnvParam(env: Environment | 'all') {
+  if (typeof window === 'undefined') return
+  const url = new URL(window.location.href)
+  if (env === 'all') url.searchParams.delete('env')
+  else url.searchParams.set('env', env)
+  window.history.pushState({ slipwayEnv: env }, '', url.href)
+}
+
 export const useSlipway = create<SlipwayState>((set, get) => {
   const initial = parseHash()
   // Sync external hash changes (browser Back/Forward, or a pasted shareable
@@ -255,6 +277,13 @@ export const useSlipway = create<SlipwayState>((set, get) => {
         set({ selectedProjectId: p.projectId })
       }
     })
+    // ponytail: Back/Forward over env (a query-only change) fires popstate but
+    // NOT hashchange, so sync the URL env back into the store here. On a
+    // hash-only back, popstate also fires but the env is unchanged → no-op.
+    window.addEventListener('popstate', () => {
+      const e = parseEnvParam()
+      if (get().env !== e) set({ env: e })
+    })
   }
   return {
   view: initial.view,
@@ -262,8 +291,8 @@ export const useSlipway = create<SlipwayState>((set, get) => {
   setView: (view) => { writeHash(view, get().selectedProjectId); set({ view }) },
   selectProject: (id) => { writeHash('project-detail', id); set({ selectedProjectId: id, view: 'project-detail' }) },
 
-  env: 'all',
-  setEnv: (env) => set({ env }),
+  env: parseEnvParam(),
+  setEnv: (env) => { writeEnvParam(env); set({ env }) },
 
   projects: [],
   deployments: [],

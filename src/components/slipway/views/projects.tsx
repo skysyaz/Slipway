@@ -22,6 +22,7 @@ import { StackGlyph, StatusDot } from '../icons'
 import { TimeAgo, Memory, Cpu } from '../format'
 import { cn } from '@/lib/utils'
 import type { Project } from '@/lib/slipway/types'
+import { envKey } from '@/lib/slipway/types'
 
 export function ProjectsView() {
   const projects = useSlipway((s) => s.projects)
@@ -42,7 +43,7 @@ export function ProjectsView() {
   const filtered = React.useMemo(
     () =>
       projects.filter((p) => {
-        if (env !== 'all' && p.environment !== env) return false
+        if (env !== 'all' && envKey(p.environment) !== envKey(env)) return false
         if (!query) return true
         return (
           p.name.toLowerCase().includes(query.toLowerCase()) ||

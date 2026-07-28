@@ -9,38 +9,66 @@ import { useSlipway } from '@/lib/slipway/store'
 import { StackGlyph, StatusDot } from '../icons'
 import { TimeAgo, Duration } from '../format'
 import { cn } from '@/lib/utils'
+import { envKey } from '@/lib/slipway/types'
 
 export function DeploymentsView() {
   const deployments = useSlipway((s) => s.deployments)
   const projects = useSlipway((s) => s.projects)
+  const env = useSlipway((s) => s.env)
   const selectProject = useSlipway((s) => s.selectProject)
   const setRollbackTarget = useSlipway((s) => s.setRollbackTarget)
+  const [queryInput, setQueryInput] = React.useState('')
   const [query, setQuery] = React.useState('')
   const [statusFilter, setStatusFilter] = React.useState<'all' | 'building' | 'healthy' | 'failed' | 'rolled_back'>('all')
 
-  const filtered = deployments.filter((d) => {
-    if (statusFilter !== 'all') {
-      if (statusFilter === 'building' && d.status !== 'building' && d.status !== 'deploying' && d.status !== 'queued') return false
-      if (statusFilter === 'healthy' && d.status !== 'healthy') return false
-      if (statusFilter === 'failed' && d.status !== 'failed' && d.status !== 'cancelled') return false
-      if (statusFilter === 'rolled_back' && d.status !== 'rolled_back') return false
-    }
-    if (!query) return true
-    return (
-      d.projectName.toLowerCase().includes(query.toLowerCase()) ||
-      d.commitMessage.toLowerCase().includes(query.toLowerCase()) ||
-      d.commitSha.includes(query.toLowerCase()) ||
-      d.author.toLowerCase().includes(query.toLowerCase())
-    )
-  })
+  // ponytail: debounce the search box so each keystroke doesn't re-filter the
+  // whole (potentially long) list + recompute the pipeline.
+  React.useEffect(() => {
+    const id = setTimeout(() => setQuery(queryInput), 150)
+    return () => clearTimeout(id)
+  }, [queryInput])
 
-  const stats = {
-    total: deployments.length,
-    healthy: deployments.filter((d) => d.status === 'healthy').length,
-    failed: deployments.filter((d) => d.status === 'failed' || d.status === 'cancelled').length,
-    inFlight: deployments.filter((d) => d.status === 'building' || d.status === 'deploying').length,
-    rolled: deployments.filter((d) => d.status === 'rolled_back' || d.rollbackOfId).length,
-  }
+  // ponytail: filter pipeline — env FIRST (single source of truth = the URL ?env=
+  // param via the store), then status, then search. Each stage narrows the
+  // previous; status + search compose ON the env-filtered set, never replacing it.
+  const byEnv = React.useMemo(
+    () => (env === 'all' ? deployments : deployments.filter((d) => envKey(d.environment) === envKey(env))),
+    [deployments, env],
+  )
+
+  const visible = React.useMemo(
+    () =>
+      byEnv.filter((d) => {
+        if (statusFilter !== 'all') {
+          if (statusFilter === 'building' && d.status !== 'building' && d.status !== 'deploying' && d.status !== 'queued') return false
+          if (statusFilter === 'healthy' && d.status !== 'healthy') return false
+          if (statusFilter === 'failed' && d.status !== 'failed' && d.status !== 'cancelled') return false
+          if (statusFilter === 'rolled_back' && d.status !== 'rolled_back') return false
+        }
+        if (!query) return true
+        const q = query.toLowerCase()
+        return (
+          d.projectName.toLowerCase().includes(q) ||
+          d.commitMessage.toLowerCase().includes(q) ||
+          d.commitSha.includes(q) ||
+          d.author.toLowerCase().includes(q)
+        )
+      }),
+    [byEnv, statusFilter, query],
+  )
+
+  // ponytail: summary reflects ONLY the env filter — the status tabs and search
+  // box narrow the visible rows but MUST NOT change these totals.
+  const stats = React.useMemo(
+    () => ({
+      total: byEnv.length,
+      healthy: byEnv.filter((d) => d.status === 'healthy').length,
+      failed: byEnv.filter((d) => d.status === 'failed' || d.status === 'cancelled').length,
+      inFlight: byEnv.filter((d) => d.status === 'building' || d.status === 'deploying').length,
+      rolled: byEnv.filter((d) => d.status === 'rolled_back' || d.rollbackOfId).length,
+    }),
+    [byEnv],
+  )
 
   return (
     <div className="space-y-5">
@@ -58,8 +86,8 @@ export function DeploymentsView() {
           <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
           <Input
             placeholder="Search by commit, project, author…"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            value={queryInput}
+            onChange={(e) => setQueryInput(e.target.value)}
             className="pl-8 h-9 text-[13px]"
           />
         </div>
@@ -80,13 +108,13 @@ export function DeploymentsView() {
       </div>
 
       <div className="rounded-xl border border-border bg-card overflow-hidden">
-        {filtered.map((d, i) => {
+        {visible.map((d, i) => {
           const project = projects.find((p) => p.id === d.projectId)
           const isDb = d.kind === 'database'
           return (
             <div
               key={d.id}
-              className={cn('p-4 hover:bg-accent/30 transition-colors', i !== filtered.length - 1 && 'border-b border-border')}
+              className={cn('p-4 hover:bg-accent/30 transition-colors', i !== visible.length - 1 && 'border-b border-border')}
             >
               <div className="flex items-start gap-3">
                 <button
@@ -206,7 +234,7 @@ export function DeploymentsView() {
             </div>
           )
         })}
-        {filtered.length === 0 && (
+        {visible.length === 0 && (
           <div className="p-12 text-center text-[13px] text-muted-foreground">
             No deployments match your filters.
           </div>

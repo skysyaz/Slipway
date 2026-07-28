@@ -2,6 +2,13 @@
 
 export type Environment = 'production' | 'staging' | 'preview'
 
+// ponytail: ONE env-identity normalizer. The env filter compares the value the
+// selector writes against the env stored on each record; both sides MUST go
+// through this so a key/case mismatch (e.g. 'Staging' vs 'staging', or '' vs
+// 'all') can never silently filter nothing. Used by the store (URL → state) and
+// every env-filtered view (Deployments / Projects / Databases).
+export const envKey = (e: unknown): string => String(e ?? '').trim().toLowerCase()
+
 export type DeploymentStatus =
   | 'queued'
   | 'building'
