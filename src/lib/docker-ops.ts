@@ -950,14 +950,33 @@ export async function realTestDatabaseConnection(
   }
   const latencyMs = Date.now() - t0
   const ok = res.exitCode === 0
+  if (ok) return { ok: true, latencyMs, state: "running" }
+  // The container is up but the engine ping failed — a postgres that's
+  // crash-looping INSIDE a "running" container (e.g. "could not write init
+  // file" repeating in its logs) shows State.Running=true, so the stopped-path
+  // classifier above never fires. Pull the logs here and classify the same way
+  // so the real root cause (read-only data dir / disk full / corrupt) surfaces
+  // instead of a generic "not accepting connections" message. (bug 1)
+  let logTail = ""
+  try {
+    logTail = (await c.logs({ stdout: true, stderr: true, follow: false })).toString("utf8").slice(-600)
+  } catch {
+    /* ignore */
+  }
+  const cls = classifyDbError(logTail || res.output)
+  // Only trust the log classification when it found a recognized pattern; if
+  // the logs are clean (engine genuinely still starting), fall back to the
+  // generic "still initializing" hint so we never fabricate a misdiagnosis.
+  const recognized = /could not write|read-only|permission denied|no space left|enospc|disk full|malformed|corrupt|authentication failed|password authentication failed|access denied|logon failed|login failed|connection refused|not accepting|already in use|already allocated/.test((logTail || res.output).toLowerCase())
   return {
-    ok,
+    ok: false,
     latencyMs,
     state: "running",
-    error: ok ? undefined : res.output.slice(0, 200) || `engine ping exited with code ${res.exitCode}`,
-    hint: ok
-      ? undefined
+    error: recognized ? cls.error : res.output.slice(0, 200) || `engine ping exited with code ${res.exitCode}`,
+    hint: recognized
+      ? cls.hint
       : "The container is up but the engine isn't accepting connections yet (still initializing?) — retry in a few seconds. If it persists, inspect the container logs on the host (`docker logs <db>`).",
+    raw: (logTail || res.output).slice(-200),
   }
 }
 
