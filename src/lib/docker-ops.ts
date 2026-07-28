@@ -539,6 +539,23 @@ export async function realReconcile(projectId: string, actor = "you"): Promise<s
   const old = docker.getContainer(project.dockerContainerId)
   const info = await old.inspect()
 
+  // ponytail: refuse to reconcile a container Docker Swarm manages. Swarm
+  // owns task containers (label `com.docker.swarm.task.id` / `com.docker.service`);
+  // stop+remove+recreate a standalone container with the task's name leaves
+  // Swarm to respawn the original task under a new id, so the recreated
+  // container "disappears" and Slipway's stored id goes stale. That was the
+  // "container 8b7366f9515b created but not shown on the dashboard" bug. The
+  // honest answer is: edit a Swarm service via `docker service update`, not by
+  // recreating its task. (Wiring service-update for arbitrary imported Swarm
+  // services is a follow-up; for now refuse with a clear message.)
+  const labels = info.Config?.Labels || {}
+  const swarmTask = labels["com.docker.swarm.task.id"] || labels["com.docker.service"]
+  if (swarmTask) {
+    throw new Error(
+      `This container is a Docker Swarm task (service ${labels["com.docker.service"] || "?"}). Slipway can't recreate it standalone — Swarm would respawn it under a new id. Edit the service via 'docker service update' on the host, or deploy a non-Swarm container to manage it from Slipway.`
+    )
+  }
+
   const image = project.dockerImage || info.Config.Image || ""
   if (!image) throw new Error("No image to reconcile to")
 
@@ -589,14 +606,19 @@ export async function realReconcile(projectId: string, actor = "you"): Promise<s
   })
   await created.start()
 
+  const fresh = await created.inspect()
+  const running = fresh.State?.Running === true
   await db.project.update({
     where: { id: projectId },
-    data: { dockerContainerId: created.id, status: "running" },
+    data: { dockerContainerId: created.id, status: running ? "running" : "failed" },
   })
   await db.service.updateMany({
     where: { projectId },
-    data: { dockerContainerId: created.id, status: "running" },
+    data: { dockerContainerId: created.id, status: running ? "running" : "failed" },
   })
+  if (!running) {
+    throw new Error(`Container was recreated but is not running (state: ${fresh.State?.Status || "exited"}). Check its logs on the host — the image/start command may be invalid.`)
+  }
   await recordActivity("deploy", `applied config changes to ${project.name} (container recreated)`, {
     projectId,
     actor,
@@ -1012,8 +1034,28 @@ export async function realProvisionDatabase(
     })
     await created.start()
 
+    // ponytail: a DB engine does its real init (initdb, etc.) AFTER the
+    // container "starts" — it can exit a moment later on a bad config, a full
+    // disk, or a bad volume. Checking State.Running immediately (as we used to)
+    // reported "running" for a container that then crash-looped. Give it a
+    // couple seconds to settle, then re-inspect; if it's not stably running,
+    // pull the logs and fail honestly.
+    await new Promise((r) => setTimeout(r, 2500))
     const info = await created.inspect()
-    if (info.State?.Running !== true) throw new Error("database container exited after start")
+    if (info.State?.Running !== true) {
+      let logTail = ""
+      try {
+        logTail = (await created.logs({ stdout: true, stderr: true, follow: false }))
+          .toString("utf8")
+          .split("\n")
+          .slice(-6)
+          .join(" ")
+          .slice(0, 400)
+      } catch { /* ignore */ }
+      throw new Error(
+        `database container exited after start (state: ${info.State?.Status || "exited"}). ${logTail}`.trim()
+      )
+    }
 
     await db.databaseInstance.update({
       where: { id: dbInstanceId },
