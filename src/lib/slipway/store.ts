@@ -216,21 +216,24 @@ export const useSlipway = create<SlipwayState>((set, get) => ({
   },
 
   refetchAll: async () => {
+    // ponytail: set each slice INDEPENDENTLY as its fetch resolves, not in one
+    // atomic Promise.all. /api/metrics samples `docker stats` per container and
+    // can take ~30s on a busy host; a single atomic set made it block the whole
+    // dashboard (the "scanned items go missing on refresh then come back" bug).
+    // Now projects/databases/volumes appear in ~50ms regardless of metrics.
     const s = get()
-    const [projects, deployments, databases, volumes, servers, backups, backupSchedules, notifications, activity, metrics] =
-      await Promise.all([
-        fetchOrKeep<Project[]>('/api/projects', s.projects),
-        fetchOrKeep<Deployment[]>('/api/deployments', s.deployments),
-        fetchOrKeep<DatabaseInstance[]>('/api/databases', s.databases),
-        fetchOrKeep<Volume[]>('/api/volumes', s.volumes),
-        fetchOrKeep<Server[]>('/api/servers', s.servers),
-        fetchOrKeep<BackupRecord[]>('/api/backups', s.backups),
-        fetchOrKeep<BackupSchedule[]>('/api/backups/schedules', s.backupSchedules),
-        fetchOrKeep<Notification[]>('/api/notifications', s.notifications),
-        fetchOrKeep<ActivityEvent[]>('/api/activity', s.activity),
-        fetchOrKeep<Metrics>('/api/metrics', s.metrics),
-      ])
-    set({ projects, deployments, databases, volumes, servers, backups, backupSchedules, notifications, activity, metrics })
+    await Promise.all([
+      fetchOrKeep<Project[]>('/api/projects', s.projects).then((v) => set({ projects: v })),
+      fetchOrKeep<Deployment[]>('/api/deployments', s.deployments).then((v) => set({ deployments: v })),
+      fetchOrKeep<DatabaseInstance[]>('/api/databases', s.databases).then((v) => set({ databases: v })),
+      fetchOrKeep<Volume[]>('/api/volumes', s.volumes).then((v) => set({ volumes: v })),
+      fetchOrKeep<Server[]>('/api/servers', s.servers).then((v) => set({ servers: v })),
+      fetchOrKeep<BackupRecord[]>('/api/backups', s.backups).then((v) => set({ backups: v })),
+      fetchOrKeep<BackupSchedule[]>('/api/backups/schedules', s.backupSchedules).then((v) => set({ backupSchedules: v })),
+      fetchOrKeep<Notification[]>('/api/notifications', s.notifications).then((v) => set({ notifications: v })),
+      fetchOrKeep<ActivityEvent[]>('/api/activity', s.activity).then((v) => set({ activity: v })),
+      fetchOrKeep<Metrics>('/api/metrics', s.metrics).then((v) => set({ metrics: v })),
+    ])
   },
 
   refetch: async (keys) => {

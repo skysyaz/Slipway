@@ -44,25 +44,32 @@ async function sample(): Promise<Sample | null> {
   let tx = 0
   const now = Date.now()
 
-  for (const c of containers) {
-    try {
-      const stats = await docker.getContainer(c.Id).stats({ stream: false })
-      const cpuUsage = stats.cpu_stats?.cpu_usage?.total_usage ?? 0
-      const preCpu = stats.precpu_stats?.cpu_usage?.total_usage ?? 0
-      const cpuSys = stats.cpu_stats?.system_cpu_usage ?? 0
-      const preSys = stats.precpu_stats?.system_cpu_usage ?? 0
-      const online = stats.cpu_stats?.online_cpus || 1
-      if (cpuSys > preSys && cpuUsage > preCpu) {
-        cpu += ((cpuUsage - preCpu) / (cpuSys - preSys)) * 100 * online
-      }
-      mem += stats.memory_stats?.usage ?? 0
-      const nets = stats.networks || {}
-      for (const k of Object.keys(nets)) {
-        rx += nets[k].rx_bytes || 0
-        tx += nets[k].tx_bytes || 0
-      }
-    } catch {
-      /* container may have exited mid-sample */
+  // ponytail: fetch each container's stats CONCURRENTLY. The serial `await` in a
+  // loop made this take ~1s per container × N containers (~30s on a busy host),
+  // which blocked the whole dashboard refetch. Promise.all lets the daemon
+  // collect them in parallel. Capped at 60 so a host with hundreds of containers
+  // can't make it pathological (sums are partial then — honest, not faked).
+  const sample = containers.slice(0, 60)
+  const statsRes = await Promise.all(
+    sample.map((c) =>
+      docker.getContainer(c.Id).stats({ stream: false }).catch(() => null)
+    )
+  )
+  for (const stats of statsRes) {
+    if (!stats) continue
+    const cpuUsage = stats.cpu_stats?.cpu_usage?.total_usage ?? 0
+    const preCpu = stats.precpu_stats?.cpu_usage?.total_usage ?? 0
+    const cpuSys = stats.cpu_stats?.system_cpu_usage ?? 0
+    const preSys = stats.precpu_stats?.system_cpu_usage ?? 0
+    const online = stats.cpu_stats?.online_cpus || 1
+    if (cpuSys > preSys && cpuUsage > preCpu) {
+      cpu += ((cpuUsage - preCpu) / (cpuSys - preSys)) * 100 * online
+    }
+    mem += stats.memory_stats?.usage ?? 0
+    const nets = stats.networks || {}
+    for (const k of Object.keys(nets)) {
+      rx += nets[k].rx_bytes || 0
+      tx += nets[k].tx_bytes || 0
     }
   }
 
