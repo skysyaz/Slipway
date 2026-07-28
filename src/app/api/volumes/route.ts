@@ -13,7 +13,12 @@ export const GET = route(async () => {
   // stored sizeGb=20/usedGb=0 were a fiction; volumes have no cap by default so
   // sizeGb becomes the host disk total (the bar = this volume's share of the
   // disk). Falls back to the stored row when Docker is down.
-  const snap = await getStorageSnapshot()
+  // ponytail: only size the volumes the dashboard tracks — avoids `du`-walking
+  // every unrelated docker volume (e.g. a 5 GB open-webui) each poll tick.
+  const tracked = vols
+    .map((v) => v.dockerVolumeName)
+    .filter(Boolean) as string[]
+  const snap = await getStorageSnapshot({ volumeNames: tracked })
   const totalGb = snap.host ? snap.host.totalBytes / 1e9 : null
   const enriched = vols.map((v) => {
     const dv = v.dockerVolumeName ? snap.volumes.get(v.dockerVolumeName) : undefined
