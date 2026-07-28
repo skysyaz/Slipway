@@ -159,7 +159,7 @@ export function ProjectDetailView() {
       </div>
 
       {project.url && (
-        <UrlBadge url={project.url} domains={project.domains} />
+        <UrlBadge url={project.url} domains={project.domains} projectId={project.id} />
       )}
 
       <Tabs value={tab} onValueChange={setProjectTab}>
@@ -232,15 +232,32 @@ export function ProjectDetailView() {
   )
 }
 
-function UrlBadge({ url, domains }: { url: string; domains: Project['domains'] }) {
+function UrlBadge({ url, domains, projectId }: { url: string; domains: Project['domains']; projectId: string }) {
   const isHttps = url.startsWith('https://')
-  // A domain can only claim active TLS when it is https AND a domain row
-  // reports managed + active. An http:// URL with a green "SSL active" was the
-  // Bug-1 lie the header used to show.
+  const host = url.replace(/^https?:\/\//, '').split('/')[0].split(':')[0]
+  const hostIsIp = /^\d+\.\d+\.\d+\.\d+$/.test(host)
+  // META-RULE 2: cert badge derived from one status model; IP mode never
+  // "Cert pending". Reachability probed server-side, not assumed.
   const activeCert = domains.find((d) => d.ssl === 'managed' && d.status === 'active' && d.https)
-  const pendingCert = domains.find((d) => d.ssl === 'managed' && d.status === 'pending')
   const failedCert = domains.find((d) => d.status === 'failed')
   const display = url.replace(/^https?:\/\//, '')
+
+  const [probe, setProbe] = React.useState<{ state: string; label: string; tone: string; hint?: string } | null>(null)
+  React.useEffect(() => {
+    let alive = true
+    api
+      .get<{ probe: { state: string; label: string; tone: string; hint?: string } }>(`/api/projects/${projectId}/reachability`)
+      .then((r) => { if (alive) setProbe(r.probe) })
+      .catch(() => {})
+    return () => { alive = false }
+  }, [projectId, url])
+
+  const toneClass: Record<string, string> = {
+    ok: 'bg-emerald-500/10 text-emerald-500 border-emerald-500/30',
+    warn: 'bg-amber-500/10 text-amber-500 border-amber-500/30',
+    error: 'bg-rose-500/10 text-rose-500 border-rose-500/30',
+    neutral: '',
+  }
   return (
     <div className="rounded-lg border border-border bg-muted/30 p-3 flex items-center gap-3 min-w-0">
       <Globe size={14} className="text-primary shrink-0" />
@@ -249,10 +266,22 @@ function UrlBadge({ url, domains }: { url: string; domains: Project['domains'] }
         target="_blank"
         rel="noreferrer"
         className="text-[13px] font-mono hover:text-primary transition-colors truncate flex-1 min-w-0 [overflow-wrap:anywhere]"
+        title={probe?.hint}
       >
         {display}
       </a>
-      {isHttps && activeCert ? (
+      {/* reachability chip (server-probed) */}
+      {probe && (
+        <Badge variant="outline" className={cn('text-[10px] h-5 shrink-0', toneClass[probe.tone])} title={probe.hint}>
+          {probe.label}
+        </Badge>
+      )}
+      {/* cert chip (derived, never "pending" for an IP) */}
+      {hostIsIp ? (
+        <Badge variant="outline" className={cn('text-[10px] h-5 shrink-0', isHttps ? 'bg-amber-500/10 text-amber-500 border-amber-500/30' : '')} title={isHttps ? 'Public CAs do not issue certs for bare IPs — self-signed.' : 'Not encrypted.'}>
+          {isHttps ? 'Self-signed' : 'HTTP'}
+        </Badge>
+      ) : isHttps && activeCert ? (
         <Badge variant="outline" className="text-[10px] h-5 bg-emerald-500/10 text-emerald-500 border-emerald-500/30 shrink-0">
           <Check size={10} className="mr-0.5" />
           HTTPS
@@ -261,7 +290,7 @@ function UrlBadge({ url, domains }: { url: string; domains: Project['domains'] }
         <Badge variant="outline" className="text-[10px] h-5 bg-rose-500/10 text-rose-500 border-rose-500/30 shrink-0">
           Cert failed
         </Badge>
-      ) : pendingCert ? (
+      ) : isHttps ? (
         <Badge variant="outline" className="text-[10px] h-5 bg-amber-500/10 text-amber-500 border-amber-500/30 shrink-0">
           Cert pending
         </Badge>
