@@ -552,13 +552,14 @@ function ServicesTab({
   project: Project
   onAddService: () => void
   onRestart: (serviceId?: string) => Promise<void>
-  onOpenLogs: () => void
+  onOpenLogs: (serviceName?: string) => void
 }) {
   const { toast } = useToast()
   const restartService = useSlipway((s) => s.restartService)
   const stopService = useSlipway((s) => s.stopService)
   const removeService = useSlipway((s) => s.removeService)
   const triggerDeployment = useSlipway((s) => s.triggerDeployment)
+  const setServiceLogScope = useSlipway((s) => s.setServiceLogScope)
 
   // Bug 3 root cause: the circular-arrow button had NO onClick and the ⋯ only
   // toasted "not wired up" — both were no-ops by design, so nothing happened
@@ -720,7 +721,8 @@ function ServicesTab({
                         icon={<ScrollText size={12} />}
                         onClick={() => {
                           setMenuFor(null)
-                          onOpenLogs()
+                          setServiceLogScope(svc.name)
+                          onOpenLogs(svc.name)
                         }}
                       />
                       <ServiceMenuItem
@@ -1056,6 +1058,17 @@ function ProjectLogsTab({ project }: { project: Project }) {
   // Chips come from THIS project's services only.
   const chips = React.useMemo(() => ['all', ...projectServices], [projectServices])
 
+  // View-logs from a service card lands here scoped to that service.
+  const serviceLogScope = useSlipway((s) => s.serviceLogScope)
+  const setServiceLogScope = useSlipway((s) => s.setServiceLogScope)
+  React.useEffect(() => {
+    if (serviceLogScope && projectServices.includes(serviceLogScope)) setFilter(serviceLogScope)
+  }, [serviceLogScope, projectServices])
+  const pickFilter = (f: string) => {
+    setFilter(f)
+    if (serviceLogScope) setServiceLogScope(null)
+  }
+
   React.useEffect(() => {
     if (containerRef.current && !paused) {
       containerRef.current.scrollTop = containerRef.current.scrollHeight
@@ -1085,7 +1098,7 @@ function ProjectLogsTab({ project }: { project: Project }) {
           {chips.map((f) => (
             <button
               key={f}
-              onClick={() => setFilter(f)}
+              onClick={() => pickFilter(f)}
               className={cn(
                 'px-2.5 h-7 rounded text-[11px] font-mono transition-colors',
                 filter === f ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent/50',
