@@ -56,7 +56,7 @@ export function NewDeploymentDialog() {
 
   const [step, setStep] = React.useState(0)
   const [source, setSource] = React.useState<Source>('git')
-  const [repoUrl, setRepoUrl] = React.useState('github.com/helixco/web')
+  const [repoUrl, setRepoUrl] = React.useState('https://github.com/')
   const [branch, setBranch] = React.useState('main')
   const [folderPath, setFolderPath] = React.useState('/srv/projects/web')
   const [composePath, setComposePath] = React.useState('/srv/projects/legacy-crm/docker-compose.yml')
@@ -346,7 +346,7 @@ function SourceStep(props: any) {
               id="repo-url"
               value={props.repoUrl}
               onChange={(e) => props.setRepoUrl(e.target.value)}
-              placeholder="github.com/org/repo"
+              placeholder="https://github.com/org/repo"
               className="font-mono text-[13px]"
             />
             <p className="text-[11px] text-muted-foreground">HTTPS or SSH. Slipway also auto-installs deploy keys if needed.</p>
