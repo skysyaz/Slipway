@@ -77,6 +77,13 @@ check("missing Dockerfile → dockerfile cause", () => {
   const d = diagnoseDeployError("failed to read dockerfile: open Dockerfile: no such file or directory")
   assert.ok(d && /Dockerfile/i.test(d.cause))
 })
+
+check("BuildKit --mount on legacy builder → buildkit cause", () => {
+  const d = diagnoseDeployError(
+    "DEPRECATED: The legacy builder is deprecated\nthe --mount option requires BuildKit"
+  )
+  assert.ok(d && /BuildKit/i.test(d.cause))
+})
 check("missing dynamic yml → routing-config cause", () => {
   const d = diagnoseDeployError("open app-foo-bar-abc.yml: no such file or directory")
   assert.ok(d && /Routing config/.test(d.cause))
