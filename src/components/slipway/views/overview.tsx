@@ -346,7 +346,7 @@ function InFlightPipeline({ deploy }: { deploy: Deployment }) {
           </div>
           <div className="text-[15px] font-medium mt-1 truncate">{deploy.projectName}</div>
           <div className="text-[12px] text-muted-foreground font-mono mt-0.5 truncate">
-            {deploy.commitSha} · {deploy.commitMessage}
+            {deploy.commitSha || '—'} · {deploy.commitMessage}
           </div>
         </div>
         <div className="text-right shrink-0">
@@ -416,7 +416,7 @@ function RecentDeployments({
                   </Badge>
                 </div>
                 <div className="text-[11px] text-muted-foreground font-mono truncate mt-0.5">
-                  {d.commitSha} · {d.commitMessage}
+                  {d.commitSha || '—'} · {d.commitMessage}
                 </div>
               </div>
               <div className="hidden md:flex flex-col items-end shrink-0 w-32">

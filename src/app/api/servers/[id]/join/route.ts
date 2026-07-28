@@ -47,7 +47,17 @@ export const POST = route(async (_req, params, auth) => {
   }
 
   const conn = new Client()
-  const result = await new Promise<{ ok: boolean; os?: string; docker?: string; error?: string }>(
+  const result = await new Promise<{
+      ok: boolean
+      os?: string
+      docker?: string
+      error?: string
+      cpuCores?: number
+      memoryGb?: number
+      diskGb?: number
+      diskUsedGb?: number
+      uptimeHours?: number
+    }>(
     (resolve) => {
       const timer = setTimeout(() => {
         try { conn.end() } catch { /* noop */ }
@@ -55,7 +65,27 @@ export const POST = route(async (_req, params, auth) => {
       }, 15000)
 
       conn.on("ready", () => {
-        conn.exec("uname -srm; echo '---'; docker --version 2>/dev/null || echo 'docker: not installed'", (err, stream) => {
+        // ponytail: probe the real hardware while we're connected. The Server
+        // row previously carried whatever the add-server dialog invented
+        // (4 cores / 16 GB / 200 GB), and nothing ever corrected it — so the
+        // Servers list reported fictional specs for every remote machine. These
+        // are all cheap, POSIX-ish reads; anything unavailable stays 0 and the
+        // UI shows "—" rather than a guess.
+        conn.exec(
+          [
+            "uname -srm",
+            "echo '---'",
+            "docker --version 2>/dev/null || echo 'docker: not installed'",
+            "echo '---'",
+            "nproc 2>/dev/null || echo 0",
+            "echo '---'",
+            "awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null || echo 0",
+            "echo '---'",
+            "df -kP / 2>/dev/null | awk 'NR==2 {print $2, $3}' || echo '0 0'",
+            "echo '---'",
+            "awk '{print $1}' /proc/uptime 2>/dev/null || echo 0",
+          ].join("; "),
+          (err, stream) => {
           if (err) {
             clearTimeout(timer)
             resolve({ ok: false, error: err.message })
@@ -66,12 +96,27 @@ export const POST = route(async (_req, params, auth) => {
           stream.stderr?.on("data", () => { /* ignore */ })
           stream.on("close", () => {
             clearTimeout(timer)
-            const [osLine, , dockerLine] = out.split("\n")
-            const docker = dockerLine && dockerLine.startsWith("Docker version ")
-              ? dockerLine.trim()
-              : ""
+            const parts = out.split("---").map((p) => p.trim())
+            const [osLine, dockerLine, nprocLine, memKbLine, dfLine, uptimeLine] = parts
+            const docker = dockerLine?.startsWith("Docker version ") ? dockerLine.trim() : ""
+            const num = (v: string | undefined) => {
+              const n = Number((v || "").trim())
+              return Number.isFinite(n) && n > 0 ? n : 0
+            }
+            const [dfTotalKb, dfUsedKb] = (dfLine || "").split(/\s+/)
             try { conn.end() } catch { /* noop */ }
-            resolve({ ok: true, os: osLine?.trim() || server.os, docker })
+            resolve({
+              ok: true,
+              os: osLine?.trim() || server.os,
+              docker,
+              cpuCores: Math.round(num(nprocLine)),
+              // /proc/meminfo reports kB
+              memoryGb: Math.round((num(memKbLine) * 1024) / 1e9 * 10) / 10,
+              // df -kP reports 1K blocks
+              diskGb: Math.round((num(dfTotalKb) * 1024) / 1e9 * 10) / 10,
+              diskUsedGb: Math.round((num(dfUsedKb) * 1024) / 1e9 * 10) / 10,
+              uptimeHours: Math.floor(num(uptimeLine) / 3600),
+            })
           })
         })
       })
@@ -99,7 +144,13 @@ export const POST = route(async (_req, params, auth) => {
         os: result.os || server.os,
         dockerVersion: result.docker || "",
         joinedAt: new Date(),
-        uptimeHours: 0,
+        // keep the previous value when a probe came back empty rather than
+        // zeroing a figure we simply failed to read this time
+        ...(result.cpuCores ? { cpuCores: result.cpuCores } : {}),
+        ...(result.memoryGb ? { memoryGb: Math.round(result.memoryGb) } : {}),
+        ...(result.diskGb ? { diskGb: Math.round(result.diskGb) } : {}),
+        ...(result.diskUsedGb ? { diskUsedGb: Math.round(result.diskUsedGb) } : {}),
+        uptimeHours: result.uptimeHours ?? 0,
       },
     })
     await emit("server.connected", "server", `joined server ${server.name}`, {
@@ -114,4 +165,4 @@ export const POST = route(async (_req, params, auth) => {
   await db.server.update({ where: { id: server.id }, data: { status: "offline" } })
   await recordActivity("server", `failed to join ${server.name}: ${result.error}`, { actor: auth.username })
   return new Response(JSON.stringify({ ok: false, error: result.error }), { status: 502 })
-})
+}, { action: "admin" })

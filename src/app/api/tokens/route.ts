@@ -34,7 +34,7 @@ export const POST = route(async (req, _params, auth) => {
     token: plaintext, // shown once to the caller
     createdAt: token.createdAt.toISOString(),
   }
-})
+}, { action: "admin" })
 
 function cryptoRandom(len: number): string {
   const bytes = new Uint8Array(len)

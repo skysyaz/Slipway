@@ -1,6 +1,7 @@
 import { route } from "@/lib/http"
 import { db } from "@/lib/db"
 import { verify as verifyTotp } from "otplib"
+import { TOTP_TOLERANCE_SECONDS } from "@/lib/auth"
 import { recordActivity, emit } from "@/lib/notify"
 
 export const dynamic = "force-dynamic"
@@ -16,7 +17,13 @@ export const POST = route(async (req, _params, auth) => {
   }
   let ok = false
   try {
-    const res = await verifyTotp({ token, secret: user.totpSecret })
+    const res = await verifyTotp({
+      token,
+      secret: user.totpSecret,
+      // Same clock-skew allowance the sign-in gate uses — enrolling must not
+      // accept a code that sign-in would then reject (or vice versa).
+      epochTolerance: TOTP_TOLERANCE_SECONDS,
+    })
     ok = res.valid === true
   } catch {
     ok = false
@@ -31,4 +38,4 @@ export const POST = route(async (req, _params, auth) => {
     kind: "security",
   }, { actor: auth.username })
   return { enabled: true }
-})
+}, { action: "admin" })

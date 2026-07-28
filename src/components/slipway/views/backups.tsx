@@ -1,7 +1,7 @@
 'use client'
 
 import * as React from 'react'
-import { Archive, Plus, RotateCcw, Download, MoreHorizontal, Clock, Check, AlertTriangle, Server } from 'lucide-react'
+import { Archive, Plus, RotateCcw, Download, Trash2, Clock, Check, AlertTriangle, Server } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { useSlipway } from '@/lib/slipway/store'
@@ -15,7 +15,44 @@ export function BackupsView() {
   const schedules = useSlipway((s) => s.backupSchedules)
   const setNewBackupOpen = useSlipway((s) => s.setNewBackupOpen)
   const setNewBackupScheduleOpen = useSlipway((s) => s.setNewBackupScheduleOpen)
+  const runBackup = useSlipway((s) => s.runBackup)
+  const deleteBackupSchedule = useSlipway((s) => s.deleteBackupSchedule)
   const { toast } = useToast()
+  const [busy, setBusy] = React.useState<string | null>(null)
+
+  // ponytail: these controls used to be pure theatre — every one of them fired
+  // a toast ("Backup started", "Retry queued", "Download started") and called
+  // nothing. Retry and schedule-delete have real endpoints, so they now use
+  // them; download/restore genuinely have no backend, so they report where the
+  // archive actually is instead of claiming an action that never happens.
+  const retry = async (target: string, targetKind: 'database' | 'volume' | 'project') => {
+    setBusy(target)
+    try {
+      await runBackup(target, targetKind)
+      toast({ title: 'Backup finished', description: `${target} was backed up.` })
+    } catch (e) {
+      toast({
+        title: 'Backup failed',
+        description: e instanceof Error ? e.message : 'Unknown error',
+        variant: 'destructive',
+      })
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const removeSchedule = async (id: string, target: string) => {
+    try {
+      await deleteBackupSchedule(id)
+      toast({ title: 'Schedule removed', description: `${target} will no longer be backed up on a cron.` })
+    } catch (e) {
+      toast({
+        title: 'Could not remove schedule',
+        description: e instanceof Error ? e.message : 'Unknown error',
+        variant: 'destructive',
+      })
+    }
+  }
 
   const stats = {
     total: backups.length,
@@ -68,8 +105,14 @@ export function BackupsView() {
                     {!s.active && <span className="ml-1 text-amber-500">· paused</span>}
                   </div>
                 </div>
-                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => toast({ title: 'Schedule actions', description: `Edit/delete schedule for ${s.target}.` })}>
-                  <MoreHorizontal size={12} />
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 w-7 p-0 text-rose-500 hover:text-rose-500"
+                  title="Remove schedule"
+                  onClick={() => void removeSchedule(s.id, s.target)}
+                >
+                  <Trash2 size={12} />
                 </Button>
               </div>
             ))
@@ -113,17 +156,50 @@ export function BackupsView() {
             <div className="col-span-1 flex items-center justify-end gap-0.5">
               {b.status === 'completed' && (
                 <>
-                  <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Download" onClick={() => toast({ title: 'Download started', description: `${b.target} backup is downloading.` })}>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 w-7 p-0"
+                    title="Where is this archive?"
+                    onClick={() =>
+                      toast({
+                        title: b.fileName ? 'Archive location' : 'No archive recorded',
+                        description: b.fileName
+                          ? `${b.fileName} — in the slipway-backups Docker volume. Copy it off the host with: docker run --rm -v slipway-backups:/b -v "$PWD":/out alpine cp /b/${b.fileName} /out/`
+                          : 'This record predates archive tracking, so Slipway does not know its filename. Look in the slipway-backups Docker volume.',
+                      })
+                    }
+                  >
                     <Download size={11} />
                   </Button>
-                  <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Restore" onClick={() => toast({ title: 'Restore initiated', description: `${b.target} restore dialog would open here.` })}>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 w-7 p-0"
+                    title="Restore"
+                    onClick={() =>
+                      toast({
+                        title: 'Restore is not automated',
+                        description: b.fileName
+                          ? `Restore ${b.fileName} yourself: copy it out of the slipway-backups volume and pipe it into the engine (e.g. gunzip -c … | psql). Slipway does not overwrite live data on your behalf.`
+                          : 'Slipway does not automate restores — it will not overwrite live data on your behalf.',
+                      })
+                    }
+                  >
                     <RotateCcw size={11} />
                   </Button>
                 </>
               )}
               {b.status === 'failed' && (
-                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Retry" onClick={() => toast({ title: 'Retry queued', description: `${b.target} backup will retry.` })}>
-                  <RotateCcw size={11} />
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 w-7 p-0"
+                  title="Retry"
+                  disabled={busy === b.target}
+                  onClick={() => void retry(b.target, b.targetKind)}
+                >
+                  <RotateCcw size={11} className={cn(busy === b.target && 'animate-spin')} />
                 </Button>
               )}
               {b.status === 'running' && (

@@ -14,10 +14,13 @@ export const POST = route(async (req, params, auth) => {
   const project = await db.project.findUnique({ where: { id: params.id } })
   if (!project) return new Response(JSON.stringify({ error: "Not found" }), { status: 404 })
   await scaleProject(params.id, params.sid || undefined, replicas, auth.username)
+  // ponytail: "system", not "deploy.success" — this fans out to Slack/PagerDuty
+  // and a scale is not a deployment; reporting one as a successful deploy makes
+  // the external feed lie about what happened.
   await emit(
-    "deploy.success",
+    "system",
     "scale",
-    `scaled ${project.name} to ${replicas} replicas`,
+    `scaled ${project.name} to ${replicas} replica${replicas === 1 ? "" : "s"}`,
     {
       title: "Scaling complete",
       body: `${project.name} now running ${replicas} replica${replicas === 1 ? "" : "s"}.`,

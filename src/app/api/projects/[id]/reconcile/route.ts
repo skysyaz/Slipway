@@ -2,7 +2,6 @@ import { route } from "@/lib/http"
 import { db } from "@/lib/db"
 import { serializeProject } from "@/lib/serialize"
 import { reconcileProject } from "@/lib/ops"
-import { recordActivity } from "@/lib/notify"
 
 export const dynamic = "force-dynamic"
 
@@ -13,6 +12,9 @@ export const dynamic = "force-dynamic"
 // downtime. Honest: 500 + the real error on failure, no fake success.
 const INCLUDE = { services: true, domains: true, envVars: true } as const
 
+// ponytail: realReconcile() already records the activity entry ("applied
+// config changes to X (container recreated)"), so this route must not record
+// a second one — it produced two audit rows for every apply.
 export const POST = route(async (_req, params, auth) => {
   const project = await db.project.findUnique({ where: { id: params.id } })
   if (!project) return new Response(JSON.stringify({ error: "Not found" }), { status: 404 })
@@ -22,10 +24,6 @@ export const POST = route(async (_req, params, auth) => {
     const msg = e instanceof Error ? e.message : "reconcile failed"
     return new Response(JSON.stringify({ error: msg }), { status: 500 })
   }
-  await recordActivity("deploy", `applied config to ${project.name}`, {
-    projectId: params.id,
-    actor: auth.username,
-  })
   const refreshed = await db.project.findUnique({ where: { id: params.id }, include: INCLUDE })
   return serializeProject(refreshed!)
 })

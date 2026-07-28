@@ -181,10 +181,14 @@ function InstallSection({ activeOs, setActiveOs }: { activeOs: 'macos' | 'linux'
       <div>
         <div className="text-[14px] font-semibold mb-3">Install the desktop app</div>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          {/* ponytail: no invented file sizes. These cards used to print
+              "14.2 MB", "15.8 MB", "16.1 MB" beside filenames for binaries this
+              release does not build — the Download button is honest about that,
+              so the size line must be too. */}
           {[
-            { os: 'macOS', detail: 'Universal · macOS 12+', file: `Slipway-${APP_TAG}.dmg`, size: '14.2 MB', icon: Apple },
-            { os: 'Linux', detail: 'AppImage · .deb · .rpm', file: `Slipway-${APP_TAG}.AppImage`, size: '15.8 MB', icon: Package },
-            { os: 'Windows', detail: 'Windows 10+ · MSI', file: `Slipway-${APP_TAG}.msi`, size: '16.1 MB', icon: Monitor },
+            { os: 'macOS', detail: 'Universal · macOS 12+', file: `Slipway-${APP_TAG}.dmg`, icon: Apple },
+            { os: 'Linux', detail: 'AppImage · .deb · .rpm', file: `Slipway-${APP_TAG}.AppImage`, icon: Package },
+            { os: 'Windows', detail: 'Windows 10+ · MSI', file: `Slipway-${APP_TAG}.msi`, icon: Monitor },
           ].map((d) => {
             const Icon = d.icon
             return (
@@ -194,7 +198,7 @@ function InstallSection({ activeOs, setActiveOs }: { activeOs: 'macos' | 'linux'
                   <span className="text-[13px] font-semibold">{d.os}</span>
                 </div>
                 <div className="text-[11px] text-muted-foreground">{d.detail}</div>
-                <div className="text-[11px] text-muted-foreground font-mono mt-1">{d.file} · {d.size}</div>
+                <div className="text-[11px] text-muted-foreground font-mono mt-1">{d.file} · not built in this release</div>
                 <Button variant="outline" size="sm" className="mt-3 h-8 w-full gap-2" onClick={() => toast({ title: 'No prebuilt binary', description: `${d.file} is not built in this release. Build the Tauri app from source, or use the web dashboard.`, variant: 'default' })}>
                   <Download size={11} />
                   Download

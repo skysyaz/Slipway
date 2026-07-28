@@ -120,7 +120,18 @@ export function DomainsView() {
             Bring your own cert by uploading it under <span className="font-mono text-[11px]">Settings → SSL</span>.
           </p>
         </div>
-        <Button variant="outline" size="sm" className="h-8 shrink-0" onClick={() => toast({ title: 'SSL renewal queued', description: 'Renewing all certificates due within 30 days.' })}>
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-8 shrink-0"
+          onClick={() =>
+            toast({
+              title: 'Slipway does not issue certificates',
+              description:
+                'Renewal is handled by your reverse proxy (Caddy/Traefik), which renews automatically while the domain resolves here and ports 80/443 are reachable. Slipway only records the domain.',
+            })
+          }
+        >
           <RefreshCw size={11} className="mr-1" />
           Renew all
         </Button>

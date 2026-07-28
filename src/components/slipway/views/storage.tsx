@@ -25,8 +25,30 @@ export function StorageView() {
   const volumes = useSlipway((s) => s.volumes)
   const projects = useSlipway((s) => s.projects)
   const setNewVolumeOpen = useSlipway((s) => s.setNewVolumeOpen)
+  const runBackup = useSlipway((s) => s.runBackup)
   const { toast } = useToast()
   const [query, setQuery] = React.useState('')
+  const [backingUp, setBackingUp] = React.useState<string | null>(null)
+
+  // ponytail: this button used to toast "Backup started" and call nothing at
+  // all — no archive was ever produced. It now runs the real backup and
+  // reports the real outcome, including failure.
+  const backupVolume = async (name: string) => {
+    setBackingUp(name)
+    try {
+      await runBackup(name, 'volume')
+      toast({ title: 'Backup complete', description: `${name} archived to the slipway-backups volume.` })
+    } catch (e) {
+      toast({
+        title: 'Backup failed',
+        description: e instanceof Error ? e.message : 'Unknown error',
+        variant: 'destructive',
+      })
+    } finally {
+      setBackingUp(null)
+    }
+  }
+
   // ponytail: real host-disk total/used via a `df` container (see
   // /api/storage/host). Replaces the old header that summed a 20 GB-per-volume
   // fiction ("240.0 GB"). Null until the first fetch resolves.
@@ -124,8 +146,15 @@ export function StorageView() {
                 <Badge variant="outline" className="text-[9px] uppercase">{v.type}</Badge>
               </div>
               <div className="col-span-1 flex items-center justify-end gap-0.5">
-                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Backup" onClick={() => toast({ title: 'Backup started', description: `${v.name} backup is running.` })}>
-                  <Archive size={12} />
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 w-7 p-0"
+                  title="Back up this volume"
+                  disabled={backingUp === v.name}
+                  onClick={() => void backupVolume(v.name)}
+                >
+                  {backingUp === v.name ? <Loader2 size={12} className="animate-spin" /> : <Archive size={12} />}
                 </Button>
                 <VolumeActions vol={v} projects={projects} />
               </div>

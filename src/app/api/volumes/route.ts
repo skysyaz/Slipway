@@ -3,8 +3,14 @@ import { db } from "@/lib/db"
 import { serializeVolume } from "@/lib/serialize"
 import { emit } from "@/lib/notify"
 import { getStorageSnapshot } from "@/lib/docker-ops"
+import { isDockerAvailable } from "@/lib/docker"
 
 export const dynamic = "force-dynamic"
+
+/** Docker volume names allow [a-zA-Z0-9][a-zA-Z0-9_.-]; normalise the label. */
+function slugifyVolume(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "") || "volume"
+}
 
 export const GET = route(async () => {
   const vols = await db.volume.findMany({ orderBy: { name: "asc" } })
@@ -39,6 +45,38 @@ export const GET = route(async () => {
 export const POST = route(async (req, _params, auth) => {
   const body = await req.json().catch(() => ({}))
   const name = String(body.name || "new-volume")
+
+  // ponytail: create the REAL Docker volume, not just a row. This route used to
+  // insert a Volume record and stop there, leaving dockerVolumeName null — so
+  // the volume existed only in SQLite. Nothing could mount it, the Storage view
+  // could never report usage for it (getStorageSnapshot keys off
+  // dockerVolumeName), and DELETE's `removeData` branch was dead code because
+  // it is guarded on that same null field. Honest failure if the engine is
+  // down, matching every other provisioning path.
+  if (!(await isDockerAvailable())) {
+    return new Response(
+      JSON.stringify({ error: "Docker engine unavailable — cannot create a real volume. Start Docker and retry." }),
+      { status: 503 }
+    )
+  }
+  const dockerVolumeName = `slipway-vol-${slugifyVolume(name)}-${Date.now().toString(36)}`
+  const { dockerClient } = await import("@/lib/docker")
+  const docker = dockerClient()
+  if (!docker) {
+    return new Response(JSON.stringify({ error: "Docker client not initialized." }), { status: 503 })
+  }
+  try {
+    await docker.createVolume({
+      Name: dockerVolumeName,
+      Labels: { "io.slipway.managed": "true", "io.slipway.name": name },
+    })
+  } catch (e) {
+    return new Response(
+      JSON.stringify({ error: `Failed to create Docker volume: ${(e as Error).message}` }),
+      { status: 500 }
+    )
+  }
+
   const vol = await db.volume.create({
     data: {
       name,
@@ -48,6 +86,7 @@ export const POST = route(async (req, _params, auth) => {
       type: String(body.type || "ssd"),
       server: String(body.server || "local"),
       encrypted: body.encrypted ?? true,
+      dockerVolumeName,
     },
   })
   await emit(

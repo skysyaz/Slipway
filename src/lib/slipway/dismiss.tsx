@@ -104,8 +104,16 @@ export function useDismiss(opts: {
   triggerRef?: React.RefObject<HTMLElement | null>
 }) {
   const ctx = React.useContext(FloatingLayerContext)
+  // ponytail: keep the latest onClose in a ref so callers can pass an inline
+  // closure without re-registering the layer entry every render. The
+  // assignment must happen in an EFFECT, not during render — writing to a ref
+  // while rendering is unsafe under React 19 / StrictMode, where a render can
+  // be discarded or replayed, and it was only passing lint because a stray
+  // `eslint-disable-next-line` further down was masking the diagnostic.
   const onCloseRef = React.useRef(opts.onClose)
-  onCloseRef.current = opts.onClose
+  React.useEffect(() => {
+    onCloseRef.current = opts.onClose
+  })
   const entryRef = React.useRef<Entry | null>(null)
 
   React.useEffect(() => {
@@ -122,7 +130,7 @@ export function useDismiss(opts: {
       if (e) ctx.release(e)
       entryRef.current = null
     }
-    // re-register only when openness or the layer context changes.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // re-register only when openness or the layer context changes; onClose is
+    // read through a ref so an inline closure doesn't re-register every render.
   }, [opts.open, ctx, opts.contentRef, opts.triggerRef])
 }

@@ -23,6 +23,13 @@ import { randomBytes } from "node:crypto"
 import { db } from "./db"
 import { emit, recordActivity } from "./notify"
 import { diagnoseDeployError, demuxToString } from "./host-health"
+import { normalizeCommitSha } from "./sanitize-fields"
+import {
+  backupSlug,
+  parseSizeMarker,
+  dumpCommandFor,
+  backupExtension,
+} from "./backup-format"
 import type { DeployOptions } from "./simulate"
 
 const STAGES = [
@@ -53,9 +60,13 @@ const STAGE_LABEL: Record<string, string> = {
   live: "Live",
 }
 
-function randSha() {
-  return Math.random().toString(16).slice(2, 9)
-}
+// ponytail: NO invented commit SHAs. Every deployment used to be stamped with
+// `Math.random().toString(16)` — a seven-character hex string the dashboard
+// displayed as the git commit and the rollback dialog quoted back as "This will
+// redeploy commit a3f9c21". For an image deploy there is no commit at all, and
+// for a git build (`docker build <url>`) Slipway never learns the resolved SHA.
+// normalizeCommitSha() keeps a real object id and discards anything else, so
+// the column stays empty and the UI renders "—". See src/lib/sanitize-fields.ts.
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
@@ -234,6 +245,39 @@ function containerName(projectSlug: string, suffix: string): string {
   return `slipway-${projectSlug}-${suffix}`.replace(/[^a-z0-9-]/g, "")
 }
 
+/**
+ * The container configuration Slipway derives from a Project row: environment
+ * variables scoped to the project's environment, the start command, and the
+ * resource limits.
+ *
+ * ONE source of truth shared by the deploy pipeline (which creates the
+ * container) and realReconcile (which recreates it). They disagreed before:
+ * reconcile applied env/limits/cmd, deploy applied none of them, so a project's
+ * configuration silently depended on which action you had run last.
+ */
+async function containerConfigFor(projectId: string): Promise<{
+  Env: string[]
+  Cmd?: string[]
+  Memory?: number
+  NanoCpus?: number
+}> {
+  const project = await db.project.findUnique({
+    where: { id: projectId },
+    include: { envVars: true },
+  })
+  if (!project) return { Env: [] }
+  const Env = project.envVars
+    .filter((e) => e.scope === "all" || e.scope === project.environment)
+    .map((e) => `${e.key}=${e.value}`)
+  const Cmd = project.startCmd ? project.startCmd.split(/\s+/).filter(Boolean) : undefined
+  return {
+    Env,
+    ...(Cmd && Cmd.length ? { Cmd } : {}),
+    ...(project.memoryMb ? { Memory: project.memoryMb * 1024 * 1024 } : {}),
+    ...(project.cpuMilli ? { NanoCpus: Math.round((project.cpuMilli / 1000) * 1e9) } : {}),
+  }
+}
+
 async function setStep(deploymentId: string, order: number, status: string) {
   await db.deploymentStep.updateMany({
     where: { deploymentId, order },
@@ -274,7 +318,7 @@ export async function realDeploy(
   const deployment = await db.deployment.create({
     data: {
       projectId,
-      commitSha: randSha(),
+      commitSha: normalizeCommitSha((opts as { commitSha?: string }).commitSha),
       commitMessage: opts.commitMessage || "Manual deploy from dashboard",
       branch: opts.branch || "main",
       author: actor,
@@ -311,13 +355,25 @@ async function runPipeline(
     actor: string
   }
 ) {
-  const finish = async (order: number) =>
-    setStep(deploymentId, order, "healthy").then(() =>
-      db.deploymentStep.updateMany({
-        where: { deploymentId, order },
-        data: { durationMs: 1000 + Math.floor(Math.random() * 3000) },
-      })
-    )
+  // ponytail: REAL step durations. `finish()` used to write
+  // `1000 + Math.random() * 3000` — a fabricated number the UI then presented
+  // as the step's measured time, which is exactly the invented data this
+  // codebase refuses to ship elsewhere. We now time each step from the moment
+  // it flips to "building".
+  const startedAt = new Map<number, number>()
+  const begin = async (order: number) => {
+    startedAt.set(order, Date.now())
+    await setStep(deploymentId, order, "building")
+  }
+  const finish = async (order: number) => {
+    const t0 = startedAt.get(order)
+    await setStep(deploymentId, order, "healthy")
+    await db.deploymentStep.updateMany({
+      where: { deploymentId, order },
+      data: { durationMs: t0 !== undefined ? Date.now() - t0 : null },
+    })
+  }
+  const pipelineStart = Date.now()
 
   try {
     const docker = await getDocker()
@@ -330,22 +386,22 @@ async function runPipeline(
       })
     }
     // checkout / detect / install — cheap for image source
-    await setStep(deploymentId, 1, "building"); await sleep(300); await finish(1)
-    await setStep(deploymentId, 2, "building"); await sleep(300); await finish(2)
+    await begin(1); await sleep(300); await finish(1)
+    await begin(2); await sleep(300); await finish(2)
     if (!ctx.isImageSource) {
-      await setStep(deploymentId, 3, "building"); await sleep(400); await finish(3)
+      await begin(3); await sleep(400); await finish(3)
     }
 
     let image = ctx.image
     if (ctx.isImageSource) {
       // image: pull (build step skipped)
-      await setStep(deploymentId, 5, "building")
+      await begin(5)
       await pullImage(docker, image)
       await finish(5)
-      await setStep(deploymentId, 6, "building"); await sleep(200); await finish(6) // image built = pulled
+      await begin(6); await sleep(200); await finish(6) // image built = pulled
     } else if (ctx.source === "compose") {
       // compose: build via CLI
-      await setStep(deploymentId, 5, "building")
+      await begin(5)
       await runCli([
         "compose",
         "-f",
@@ -356,12 +412,18 @@ async function runPipeline(
       image = "" // compose manages its own images
     } else {
       // git/folder: docker build
-      await setStep(deploymentId, 5, "building")
-      const tag = `slipway-${projectSlug}:latest`
+      await begin(5)
+      // ponytail: tag the build with the DEPLOYMENT ID as well as :latest.
+      // :latest alone is overwritten by every subsequent build, so the image a
+      // past deployment released stopped existing the moment the next one ran —
+      // there was literally nothing for a rollback to return to. The immutable
+      // per-deployment tag is what makes realRollback() able to do real work.
+      const versionTag = `slipway-${projectSlug}:${deploymentId.slice(-8)}`
+      const latestTag = `slipway-${projectSlug}:latest`
       const ctxPath = String(ctx.opts.folderPath || ctx.opts.repoUrl || ".")
       try {
-        await runCli(["build", "-t", tag, ctxPath])
-        image = tag
+        await runCli(["build", "-t", versionTag, "-t", latestTag, ctxPath])
+        image = versionTag
         await finish(5)
       } catch (be) {
         // ponytail: persist the real build stderr (ENOSPC etc.) on the step + rethrow
@@ -372,10 +434,10 @@ async function runPipeline(
     }
 
     // push step: no-op for local registry
-    await setStep(deploymentId, 7, "building"); await sleep(200); await finish(7)
+    await begin(7); await sleep(200); await finish(7)
 
     // release: run the container
-    await setStep(deploymentId, 8, "building")
+    await begin(8)
     let containerId: string | null = null
     if (ctx.source === "compose") {
       try {
@@ -394,13 +456,24 @@ async function runPipeline(
         /* ignore */
       }
       try {
+        // ponytail: apply the project's ACTUAL configuration. This used to
+        // create the container with `Env: []` and no resource limits, so env
+        // vars entered in the dashboard never reached the running app and the
+        // memory/CPU fields were decorative — they only took effect if the user
+        // later hit the separate "Apply to container" (reconcile) action, which
+        // did read them. Deploy and reconcile now build the container the same
+        // way; realReconcile() is the in-place variant of this block.
+        const cfg = await containerConfigFor(projectId)
         const created = await docker.createContainer({
           Image: image,
           name,
-          Env: [],
+          Env: cfg.Env,
+          ...(cfg.Cmd ? { Cmd: cfg.Cmd } : {}),
           HostConfig: {
             RestartPolicy: { Name: "unless-stopped" },
             PortBindings: {},
+            ...(cfg.Memory ? { Memory: cfg.Memory } : {}),
+            ...(cfg.NanoCpus ? { NanoCpus: cfg.NanoCpus } : {}),
           },
         })
         await created.start()
@@ -415,7 +488,7 @@ async function runPipeline(
     await finish(8)
 
     // verify: container is running
-    await setStep(deploymentId, 9, "building")
+    await begin(9)
     if (containerId) {
       const c = docker.getContainer(containerId)
       const info = await c.inspect()
@@ -429,7 +502,10 @@ async function runPipeline(
         await failStep(9, tail)
         throw new Error("container exited after start")
       }
-      await db.project.update({ where: { id: projectId }, data: { dockerContainerId: containerId } })
+      await db.project.update({
+        where: { id: projectId },
+        data: { dockerContainerId: containerId, dockerImage: image || undefined },
+      })
       await db.service.updateMany({
         where: { projectId },
         data: { dockerContainerId: containerId, status: "running" },
@@ -438,11 +514,19 @@ async function runPipeline(
     await finish(9)
 
     // live
-    await setStep(deploymentId, 10, "building"); await sleep(300); await finish(10)
+    await begin(10); await sleep(300); await finish(10)
 
+    // ponytail: record the REAL wall-clock duration. This wrote `durationMs: 0`
+    // before, so every successful deploy reported "0ms" in the UI.
     await db.deployment.update({
       where: { id: deploymentId },
-      data: { status: "healthy", finishedAt: new Date(), durationMs: 0 },
+      data: {
+        status: "healthy",
+        finishedAt: new Date(),
+        durationMs: Date.now() - pipelineStart,
+        // what this deployment actually released — the anchor for rollback
+        image: image || null,
+      },
     })
     await db.project.update({
       where: { id: projectId },
@@ -464,7 +548,13 @@ async function runPipeline(
     const errorStr = (diag ? `${diag.cause} → ${diag.action}` : errText).slice(0, 500)
     await db.deployment.update({
       where: { id: deploymentId },
-      data: { status: "failed", finishedAt: new Date(), error: errorStr || null },
+      data: {
+        status: "failed",
+        finishedAt: new Date(),
+        // a failed deploy took real time too — the list shows it
+        durationMs: Date.now() - pipelineStart,
+        error: errorStr || null,
+      },
     })
     await db.project.update({ where: { id: projectId }, data: { status: "error" } })
     await emit(
@@ -534,12 +624,26 @@ export async function realRestart(
   } else {
     ids = await projectContainerIds(projectId)
   }
+  // ponytail: don't claim "running" for containers that did NOT restart. This
+  // swallowed every failure and then unconditionally wrote status=running, so
+  // restarting a project whose container had been removed on the host left the
+  // dashboard showing a healthy service backed by nothing.
+  if (ids.length === 0) {
+    throw new Error(
+      "No real container is linked to this project — deploy it first (or re-scan the host if it was created outside Slipway)."
+    )
+  }
+  const failures: string[] = []
   for (const id of ids) {
     try {
       await docker.getContainer(id).restart()
-    } catch {
-      /* container may be gone */
+    } catch (e) {
+      failures.push((e as Error).message)
     }
+  }
+  if (failures.length === ids.length) {
+    await db.project.update({ where: { id: projectId }, data: { status: "error" } }).catch(() => {})
+    throw new Error(`Restart failed: ${failures[0]}`)
   }
   await db.service.updateMany({
     where: { projectId, ...(serviceId ? { id: serviceId } : {}) },
@@ -554,20 +658,26 @@ export async function realRestart(
 
 export async function realStop(projectId: string, actor = "you"): Promise<void> {
   const docker = await getDocker()
+  const project = await db.project.findUnique({ where: { id: projectId }, select: { name: true } })
   const ids = await projectContainerIds(projectId)
   for (const id of ids) {
     try {
       await docker.getContainer(id).stop()
     } catch {
-      /* ignore */
+      /* already stopped or gone — the desired end state either way */
     }
   }
   await db.project.update({ where: { id: projectId }, data: { status: "stopped" } })
   await db.service.updateMany({ where: { projectId }, data: { status: "stopped" } })
-  void actor
+  // Stopping an app is an operator action; it belongs in the audit log next to
+  // restart/scale/deploy rather than happening invisibly.
+  await recordActivity("scale", `stopped ${project?.name || projectId}`, { projectId, actor })
 }
 
 export async function realRemove(projectId: string, actor = "you"): Promise<void> {
+  // Read the name BEFORE the row is deleted — the activity entry used to record
+  // the raw cuid, which is meaningless in the audit log once the row is gone.
+  const doomed = await db.project.findUnique({ where: { id: projectId }, select: { name: true } })
   // ponytail: delete the PROJECT ROW, not just the container. The previous
   // version only `docker rm`'d the containers and returned — the Project row (and
   // its services/domains/envVars) stayed in SQLite, so the app reappeared after
@@ -593,8 +703,7 @@ export async function realRemove(projectId: string, actor = "you"): Promise<void
     /* Docker engine down — still delete the row; the container is orphaned */
   }
   await db.project.delete({ where: { id: projectId } })
-  await recordActivity("deploy", `deleted project "${projectId}"`, { actor })
-  void actor
+  await recordActivity("deploy", `deleted project "${doomed?.name || projectId}"`, { actor })
 }
 
 // Live, non-destructive `docker update` for resource limits. Only applied when
@@ -666,24 +775,29 @@ export async function realReconcile(projectId: string, actor = "you"): Promise<s
   if (!image) throw new Error("No image to reconcile to")
 
   // Env: keep the container's existing env (minus PATH, which the image sets),
-  // then overlay Slipway's env vars (last write wins per key).
+  // then overlay Slipway's env vars (last write wins per key). The Slipway side
+  // comes from containerConfigFor() — the same helper the deploy pipeline uses,
+  // so a container built by a deploy and one rebuilt by a reconcile carry
+  // identical Slipway configuration.
+  const cfg = await containerConfigFor(projectId)
   const envMap = new Map<string, string>()
   for (const e of info.Config.Env || []) {
     const i = e.indexOf("=")
     if (i > 0 && e.slice(0, i) !== "PATH") envMap.set(e.slice(0, i), e.slice(i + 1))
   }
-  for (const e of project.envVars) {
-    if (e.scope === "all" || e.scope === project.environment) envMap.set(e.key, e.value)
+  for (const e of cfg.Env) {
+    const i = e.indexOf("=")
+    if (i > 0) envMap.set(e.slice(0, i), e.slice(i + 1))
   }
   const Env = [...envMap].map(([k, v]) => `${k}=${v}`)
-  const Cmd = project.startCmd ? project.startCmd.split(/\s+/).filter(Boolean) : info.Config.Cmd || undefined
+  const Cmd = cfg.Cmd ?? info.Config.Cmd ?? undefined
 
   const hc = (info.HostConfig || {}) as Docker.HostConfig
   const HostConfig: Docker.HostConfig = {
     RestartPolicy: { Name: "unless-stopped" },
     PortBindings: hc.PortBindings || {},
-    Memory: project.memoryMb ? project.memoryMb * 1024 * 1024 : hc.Memory,
-    NanoCpus: project.cpuMilli ? Math.round((project.cpuMilli / 1000) * 1e9) : hc.NanoCpus,
+    Memory: cfg.Memory ?? hc.Memory,
+    NanoCpus: cfg.NanoCpus ?? hc.NanoCpus,
   }
   // preserve named-volume binds (data volumes survive the recreate)
   const binds = (info.Mounts || [])
@@ -730,6 +844,305 @@ export async function realReconcile(projectId: string, actor = "you"): Promise<s
     actor,
   })
   return created.id
+}
+
+/**
+ * Roll a project back to the image a previous deployment released.
+ *
+ * ponytail: this used to be `simulateRollback` — it created a Deployment row
+ * with status "healthy", hardcoded step durations (800/4200/5200/400ms) and
+ * `durationMs: 12_000`, then emitted "Rollback complete. Health checks passed."
+ * It never touched Docker. The container kept running the exact image it was
+ * already running, while the dashboard and the notification both told the
+ * operator the rollback had succeeded — the most dangerous fake success in the
+ * codebase, because rollback is what people reach for during an incident.
+ *
+ * The real thing: recreate the project's container from the target
+ * deployment's recorded image, preserving the container's volumes, networks,
+ * port bindings and labels exactly as realReconcile does, then record the
+ * outcome with measured timings. Fails honestly when there is nothing to roll
+ * back to (no recorded image, image pruned off the host, no container).
+ */
+export async function realRollback(deploymentId: string, actor = "you"): Promise<string> {
+  const target = await db.deployment.findUnique({ where: { id: deploymentId } })
+  if (!target) throw new Error("Deployment not found")
+  if (!target.projectId) throw new Error("This deployment has no project to roll back")
+  const project = await db.project.findUnique({ where: { id: target.projectId } })
+  if (!project) throw new Error("Project not found")
+
+  if (!target.image) {
+    throw new Error(
+      "That deployment didn't record an image, so there is nothing to roll back to. Deployments taken before this Slipway version — and compose deploys, where compose owns the images — can't be rolled back automatically."
+    )
+  }
+  if (!project.dockerContainerId) {
+    throw new Error("This project has no running container to roll back — deploy it first.")
+  }
+
+  const docker = await getDocker()
+
+  // The image must still exist on the host: `docker image prune` or a manual
+  // cleanup can remove it, and recreating from a missing image would fail
+  // halfway through, after the current container had already been destroyed.
+  // Check BEFORE touching anything.
+  try {
+    await docker.getImage(target.image).inspect()
+  } catch {
+    throw new Error(
+      `Image "${target.image}" is no longer on this host (pruned?), so the rollback can't run. Redeploy from source instead.`
+    )
+  }
+
+  const startedAt = Date.now()
+  const steps = [
+    { stage: "queued", label: "Queued", order: 0 },
+    { stage: "release", label: "Release", order: 1 },
+    { stage: "verify", label: "Health check", order: 2 },
+    { stage: "live", label: "Live", order: 3 },
+  ]
+  const rollback = await db.deployment.create({
+    data: {
+      projectId: project.id,
+      commitSha: target.commitSha,
+      commitMessage: `Rollback to ${target.commitSha || target.image}`,
+      branch: target.branch,
+      author: actor,
+      environment: target.environment,
+      status: "deploying",
+      rollbackOfId: target.id,
+      image: target.image,
+      url: project.url || undefined,
+      steps: {
+        create: steps.map((s) => ({ ...s, status: "queued", startedAt: null, finishedAt: null })),
+      },
+    },
+  })
+
+  // Set when a failed rollback successfully put the previous container back —
+  // the project is then still serving traffic, so the catch below must not
+  // stamp it "error" on top of the "running" the restore just wrote.
+  let recovered = false
+
+  const stepStart = new Map<number, number>()
+  const begin = async (order: number) => {
+    stepStart.set(order, Date.now())
+    await db.deploymentStep.updateMany({
+      where: { deploymentId: rollback.id, order },
+      data: { status: "building", startedAt: new Date() },
+    })
+  }
+  const finish = async (order: number) => {
+    const t0 = stepStart.get(order)
+    await db.deploymentStep.updateMany({
+      where: { deploymentId: rollback.id, order },
+      data: {
+        status: "healthy",
+        finishedAt: new Date(),
+        durationMs: t0 !== undefined ? Date.now() - t0 : null,
+      },
+    })
+  }
+  const failStep = async (order: number, log: string) => {
+    await db.deploymentStep.updateMany({
+      where: { deploymentId: rollback.id, order },
+      data: { status: "failed", finishedAt: new Date(), log: log.slice(-1200) || null },
+    })
+  }
+
+  try {
+    await begin(0)
+    await finish(0)
+
+    // release: recreate the container on the target image
+    await begin(1)
+    const old = docker.getContainer(project.dockerContainerId)
+    const info = await old.inspect()
+
+    const labels = info.Config?.Labels || {}
+    if (labels["com.docker.swarm.task.id"] || labels["com.docker.service"]) {
+      throw new Error(
+        "This container is a Docker Swarm task — Swarm would respawn it under a new id, so Slipway won't recreate it. Roll back via 'docker service update' on the host."
+      )
+    }
+
+    const cfg = await containerConfigFor(project.id)
+    const envMap = new Map<string, string>()
+    for (const e of info.Config.Env || []) {
+      const i = e.indexOf("=")
+      if (i > 0 && e.slice(0, i) !== "PATH") envMap.set(e.slice(0, i), e.slice(i + 1))
+    }
+    for (const e of cfg.Env) {
+      const i = e.indexOf("=")
+      if (i > 0) envMap.set(e.slice(0, i), e.slice(i + 1))
+    }
+    const hc = (info.HostConfig || {}) as Docker.HostConfig
+    const HostConfig: Docker.HostConfig = {
+      RestartPolicy: { Name: "unless-stopped" },
+      PortBindings: hc.PortBindings || {},
+      Memory: cfg.Memory ?? hc.Memory,
+      NanoCpus: cfg.NanoCpus ?? hc.NanoCpus,
+    }
+    const binds = (info.Mounts || [])
+      .filter((m) => m.Type === "volume" && m.Name)
+      .map((m) => `${m.Name}:${m.Destination}`)
+    if (binds.length) HostConfig.Binds = binds
+    const nets = info.NetworkSettings?.Networks || {}
+    const EndpointsConfig: Record<string, Docker.EndpointSettings> = {}
+    for (const n of Object.keys(nets)) EndpointsConfig[n] = {}
+    const name = (info.Name || "").replace(/^\//, "")
+
+    // ponytail: RENAME the current container aside instead of destroying it, so
+    // a rollback that fails to come up can be undone. The dialog promises "if
+    // health checks fail, the rollback is aborted automatically" — that promise
+    // is only keepable if the known-good container still exists. Removing it
+    // first (the obvious implementation) means a bad rollback takes the service
+    // down with no way back, during an incident, which is the worst possible
+    // moment to discover it.
+    const backupName = `${name || "slipway-rollback"}-prev-${Date.now().toString(36)}`
+    let backedUp = false
+    await old.stop().catch(() => {})
+    try {
+      await old.rename({ name: backupName })
+      backedUp = true
+    } catch {
+      // rename unsupported/failed — fall back to removing it; we can no longer
+      // restore, and the catch below reports that honestly.
+      await old.remove({ force: true }).catch(() => {})
+    }
+
+    /** Put the previous container back and start it. Best-effort. */
+    const restorePrevious = async (): Promise<boolean> => {
+      if (!backedUp) return false
+      try {
+        const prev = docker.getContainer(backupName)
+        await prev.rename({ name })
+        await prev.start()
+        const back = await prev.inspect()
+        if (back.State?.Running === true) {
+          await db.project.update({
+            where: { id: project.id },
+            data: { dockerContainerId: prev.id, status: "running" },
+          })
+          await db.service.updateMany({
+            where: { projectId: project.id },
+            data: { dockerContainerId: prev.id, status: "running" },
+          })
+          recovered = true
+          return true
+        }
+      } catch {
+        /* fall through — reported by the caller */
+      }
+      return false
+    }
+
+    let created: Docker.Container
+    try {
+      created = await docker.createContainer({
+        Image: target.image,
+        name: name || undefined,
+        Env: [...envMap].map(([k, v]) => `${k}=${v}`),
+        ...(cfg.Cmd ? { Cmd: cfg.Cmd } : info.Config.Cmd ? { Cmd: info.Config.Cmd } : {}),
+        HostConfig,
+        ...(Object.keys(EndpointsConfig).length ? { NetworkingConfig: { EndpointsConfig } } : {}),
+        ...(Object.keys(labels).length ? { Labels: labels } : {}),
+      })
+      await created.start()
+    } catch (ce) {
+      const restored = await restorePrevious()
+      await failStep(1, (ce as Error).message)
+      throw new Error(
+        `Couldn't start ${target.image}: ${(ce as Error).message}. ${
+          restored
+            ? "The previous container was restored and is running again."
+            : "The previous container could NOT be restored — check the host."
+        }`
+      )
+    }
+    await finish(1)
+
+    // verify: it has to actually be running, same bar as a deploy
+    await begin(2)
+    const fresh = await created.inspect()
+    if (fresh.State?.Running !== true) {
+      const tail = await created
+        .logs({ stdout: true, stderr: true, follow: false })
+        .then((b) => demuxToString(b).slice(-1200))
+        .catch(() => "")
+      await failStep(2, tail)
+      // abort: drop the failed container and put the known-good one back
+      await created.remove({ force: true }).catch(() => {})
+      const restored = await restorePrevious()
+      throw new Error(
+        `Rolled-back container is not running (state: ${fresh.State?.Status || "exited"}). The previous image may not start with the project's current configuration. ${
+          restored
+            ? "Rollback aborted — the previous container was restored and is running again."
+            : "The previous container could NOT be restored — check the host."
+        }`
+      )
+    }
+    // rollback is good — discard the saved container
+    if (backedUp) {
+      await docker.getContainer(backupName).remove({ force: true }).catch(() => {})
+    }
+    await db.project.update({
+      where: { id: project.id },
+      data: {
+        dockerContainerId: created.id,
+        dockerImage: target.image,
+        status: "running",
+        lastDeployedAt: new Date(),
+      },
+    })
+    await db.service.updateMany({
+      where: { projectId: project.id },
+      data: { dockerContainerId: created.id, status: "running" },
+    })
+    await finish(2)
+
+    await begin(3)
+    await finish(3)
+
+    await db.deployment.update({
+      where: { id: rollback.id },
+      data: { status: "healthy", finishedAt: new Date(), durationMs: Date.now() - startedAt },
+    })
+    await emit(
+      "rollback",
+      "rollback",
+      `rolled back ${project.name} to ${target.commitSha || target.image}`,
+      {
+        title: "Rollback complete",
+        body: `${project.name} is running ${target.image} again.`,
+        level: "success",
+        kind: "deploy",
+      },
+      { projectId: project.id, actor }
+    )
+  } catch (e) {
+    const msg = (e as Error).message
+    await db.deployment.update({
+      where: { id: rollback.id },
+      data: {
+        status: "failed",
+        finishedAt: new Date(),
+        durationMs: Date.now() - startedAt,
+        error: msg.slice(0, 500),
+      },
+    })
+    if (!recovered) {
+      await db.project.update({ where: { id: project.id }, data: { status: "error" } }).catch(() => {})
+    }
+    await emit(
+      "rollback",
+      "rollback",
+      `rollback of ${project.name} failed: ${msg.slice(0, 160)}`,
+      { title: "Rollback failed", body: `${project.name}: ${msg.slice(0, 200)}`, level: "error", kind: "deploy" },
+      { projectId: project.id, actor }
+    )
+    throw e
+  }
+  return rollback.id
 }
 
 // Restart a real database container (managed or scanned/imported).
@@ -804,26 +1217,46 @@ export async function realSetDatabaseCredentials(
   if (!newPass) throw new Error("A new password is required")
   const username = patch.username?.trim() || row.username || engine.defaultUser || ""
 
+  // ponytail: the username is interpolated into a SQL IDENTIFIER, where quoting
+  // rules differ per engine (" for postgres, ` for mysql, [ ] for mssql) and an
+  // embedded delimiter breaks out of all of them. Escaping three dialects
+  // correctly is a losing game, so restrict the identifier instead: reject
+  // anything that isn't a plain SQL name. Passwords are still escaped below —
+  // they are string literals, where doubling the quote is well defined.
+  if (!/^[A-Za-z_][A-Za-z0-9_$]*$/.test(username)) {
+    throw new Error(
+      `"${username}" isn't a usable database username — use letters, digits and underscores, starting with a letter or underscore.`
+    )
+  }
+
   const docker = await getDocker()
-  // mssql SA password = stored raw + "Aa1!" (complexity suffix), see ENGINE_SPECS
-  const isMssql = row.kind === "mssql"
-  const currentAdmin = isMssql ? `${row.password ?? ""}Aa1!` : row.password ?? ""
-  const newAdmin = isMssql ? `${newPass}Aa1!` : newPass
+  // ponytail: the admin password is EXACTLY what the row stores. This used to
+  // append "Aa1!" for mssql to mirror a suffix that provisioning added only to
+  // the container's env — so the stored value and the real SA password differed.
+  // genPassword() now guarantees complexity itself and provisioning sets the
+  // stored value verbatim, so there is no suffix anywhere. Reintroducing one
+  // here would recreate the "revealed credentials don't work" bug.
+  const currentAdmin = row.password ?? ""
+
+  // Escape a SQL string literal by doubling the quote. Valid for postgres,
+  // mssql, and mysql/mariadb alike (MySQL accepts '' as an escaped quote
+  // regardless of NO_BACKSLASH_ESCAPES, which backslash escaping does not).
+  const lit = (v: string) => v.replace(/'/g, "''")
 
   let cmd: string[]
   switch (row.kind) {
     case "postgres":
-      cmd = ["psql", "-U", username, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", `ALTER USER "${username}" WITH PASSWORD '${newPass.replace(/'/g, "''")}';`]
+      cmd = ["psql", "-U", username, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", `ALTER USER "${username}" WITH PASSWORD '${lit(newPass)}';`]
       break
     case "mysql":
     case "mariadb":
-      cmd = ["mysql", "-u", "root", `-p${currentAdmin}`, "-e", `ALTER USER '${username}'@'%' IDENTIFIED BY '${newPass.replace(/'/g, "\\'")}';`]
+      cmd = ["mysql", "-u", "root", `-p${currentAdmin}`, "-e", `ALTER USER '${username}'@'%' IDENTIFIED BY '${lit(newPass)}';`]
       break
     case "mongodb":
-      cmd = ["mongosh", "--quiet", "-u", "root", "-p", currentAdmin, "--authenticationDatabase", "admin", "--eval", `db.changeUserPassword('${username}','${newPass.replace(/'/g, "\\'")}')`]
+      cmd = ["mongosh", "--quiet", "-u", "root", "-p", currentAdmin, "--authenticationDatabase", "admin", "--eval", `db.changeUserPassword(${JSON.stringify(username)},${JSON.stringify(newPass)})`]
       break
     case "mssql":
-      cmd = ["/opt/mssql-tools18/bin/sqlcmd", "-S", "localhost", "-U", "sa", "-P", currentAdmin, "-C", "-Q", `ALTER LOGIN [${username}] WITH PASSWORD = '${newAdmin.replace(/'/g, "''")}';`]
+      cmd = ["/opt/mssql-tools18/bin/sqlcmd", "-S", "localhost", "-U", "sa", "-P", currentAdmin, "-C", "-Q", `ALTER LOGIN [${username}] WITH PASSWORD = '${lit(newPass)}';`]
       break
     case "redis":
     case "valkey":
@@ -837,8 +1270,8 @@ export async function realSetDatabaseCredentials(
     throw new Error(`engine rejected the credential change (exit ${exitCode}): ${output.slice(0, 300)}`)
   }
 
-  // store the raw password (without the mssql suffix) so /credentials reveals
-  // exactly what the user set + the suffix they must append for mssql.
+  // Store exactly what was set on the engine — /credentials reveals this value
+  // verbatim and it must be the password that actually works.
   await db.databaseInstance.update({
     where: { id: dbId },
     data: { password: newPass, username },
@@ -897,7 +1330,7 @@ export async function realTestDatabaseConnection(
   if (info.State?.Running !== true) {
     let logTail = ""
     try {
-      logTail = (await c.logs({ stdout: true, stderr: true, follow: false })).toString("utf8").slice(-600)
+      logTail = demuxToString(await c.logs({ stdout: true, stderr: true, follow: false })).slice(-600)
     } catch {
       /* ignore */
     }
@@ -935,7 +1368,7 @@ export async function realTestDatabaseConnection(
       cmd = ["valkey-cli", "-a", pass, "ping"]
       break
     case "mssql":
-      cmd = ["/opt/mssql-tools18/bin/sqlcmd", "-S", "127.0.0.1", "-U", "sa", "-P", `${pass}Aa1!`, "-C", "-Q", "SELECT 1"]
+      cmd = ["/opt/mssql-tools18/bin/sqlcmd", "-S", "127.0.0.1", "-U", "sa", "-P", pass, "-C", "-Q", "SELECT 1"]
       break
     default:
       return { ok: false, error: `No ping command for ${row.kind}` }
@@ -1033,29 +1466,158 @@ export async function realScale(
   const services = await db.service.findMany({
     where: { projectId, ...(serviceId ? { id: serviceId } : {}) },
   })
-  // ponytail: real multi-replica orchestration needs a scheduler; for
-  // single-node we treat `replicas` as the desired count on the service record
-  // and (re)create that many containers from the project image when possible.
-  for (const s of services) {
-    await db.service.update({ where: { id: s.id }, data: { replicas } })
-    if (project.dockerContainerId && replicas === 0) {
-      try {
-        await docker.getContainer(project.dockerContainerId).stop()
-      } catch {
-        /* ignore */
-      }
+
+  // ponytail: real multi-replica orchestration needs a scheduler (Swarm/K8s),
+  // which this single-node build explicitly does not have — so >1 replica is
+  // refused instead of being recorded as if it happened. What single-node CAN
+  // honour exactly is 0 (stop) and 1 (run), and that is now done for real in
+  // BOTH directions. Previously only the 0 case touched Docker: scaling back to
+  // 1 wrote replicas=1 to the row and left the container stopped, so the
+  // dashboard showed a running service that was not running.
+  if (replicas > 1) {
+    throw new Error(
+      `Slipway is single-node and has no scheduler, so it can't run ${replicas} replicas of one service. Scale to 0 (stop) or 1 (run), or put a real orchestrator behind it.`
+    )
+  }
+  if (replicas < 0) throw new Error("Replica count can't be negative.")
+
+  const ids = serviceId
+    ? services.map((s) => s.dockerContainerId).filter(Boolean as unknown as (v: string | null) => v is string)
+    : await projectContainerIds(projectId)
+
+  const errors: string[] = []
+  for (const id of ids) {
+    try {
+      const c = docker.getContainer(id)
+      if (replicas === 0) await c.stop()
+      else await c.start()
+    } catch (e) {
+      const msg = (e as Error & { statusCode?: number }).message || ""
+      // 304 = already in the requested state; that is success, not an error.
+      if ((e as { statusCode?: number }).statusCode !== 304) errors.push(msg)
     }
   }
-  void actor
+  if (errors.length && errors.length === ids.length) {
+    throw new Error(`Could not ${replicas === 0 ? "stop" : "start"} the container(s): ${errors[0]}`)
+  }
+
+  const status = replicas === 0 ? "stopped" : "running"
+  for (const s of services) {
+    await db.service.update({ where: { id: s.id }, data: { replicas, status } })
+  }
+  if (!serviceId) {
+    await db.project.update({ where: { id: projectId }, data: { status, replicas } })
+  }
+  await recordActivity("scale", `scaled ${project.name} to ${replicas} replica(s)`, {
+    projectId,
+    actor,
+  })
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Backups.
+//
+// ponytail: these used to be theatre. The volume path ran `tar -c /data
+// >/dev/null` (tar to the bit bucket — nothing was ever stored), the database
+// path did nothing at all beyond inspecting a container, and BOTH then wrote
+// `sizeMb = Math.random() * 4000 + 100` and `durationMs: 5000` before emitting
+// "Backup completed — snapshot stored." A restore was impossible and the size
+// column was a random number. That is precisely the fake success this codebase
+// refuses to ship everywhere else, so it is now real:
+//
+//   - archives are written into the `slipway-backups` named Docker volume, so
+//     they survive the Slipway container being recreated,
+//   - the recorded size is `stat` of the produced file, and the duration is
+//     measured,
+//   - databases are dumped with their engine's own tool (pg_dump, mysqldump,
+//     mongodump, redis-cli --rdb) from a helper container that shares the DB
+//     container's network namespace, so it reaches the engine on 127.0.0.1
+//     whatever the network topology is,
+//   - anything not actually supported fails honestly instead of recording a
+//     completed backup that does not exist.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Named Docker volume every archive is written into. */
+const BACKUP_VOLUME = "slipway-backups"
+
+async function ensureBackupVolume(docker: Docker): Promise<void> {
+  try {
+    await docker.getVolume(BACKUP_VOLUME).inspect()
+  } catch {
+    await docker.createVolume({ Name: BACKUP_VOLUME })
+  }
+}
+
+/**
+ * Run a throwaway helper container to completion and return its exit code plus
+ * combined output. Used for the archive/dump work, which has to happen inside a
+ * container that can see the volume or the database.
+ *
+ * Tty:true so the logs come back as plain text rather than dockerode's
+ * multiplexed framing.
+ */
+async function runHelper(
+  docker: Docker,
+  opts: {
+    Image: string
+    Cmd: string[]
+    Env?: string[]
+    Binds?: string[]
+    NetworkMode?: string
+  }
+): Promise<{ exitCode: number; output: string }> {
+  const create = () =>
+    docker.createContainer({
+      Image: opts.Image,
+      Cmd: opts.Cmd,
+      ...(opts.Env ? { Env: opts.Env } : {}),
+      Tty: true,
+      HostConfig: {
+        ...(opts.Binds ? { Binds: opts.Binds } : {}),
+        ...(opts.NetworkMode ? { NetworkMode: opts.NetworkMode } : {}),
+      },
+    })
+  let c: Docker.Container
+  try {
+    c = await create()
+  } catch {
+    // image not present locally — pull it and retry once
+    await pullImage(docker, opts.Image)
+    c = await create()
+  }
+  try {
+    await c.start()
+    // ponytail: wait for exit BEFORE reading logs. Reading first returns an
+    // empty buffer for anything that takes more than an instant — the same
+    // mistake that made every volume measure 0 bytes in getVolumeSizes().
+    const res = (await c.wait()) as { StatusCode?: number }
+    const output = (await c.logs({ stdout: true, stderr: true, follow: false })).toString("utf8")
+    return { exitCode: Number(res?.StatusCode ?? 0), output }
+  } finally {
+    await c.remove({ force: true }).catch(() => {})
+  }
+}
+
+/**
+ * Take a real backup of a volume or a managed database.
+ *
+ * `target` is the Slipway row's display name (that is what the dialog and the
+ * scheduler pass), not a Docker object name — resolved here.
+ */
 export async function realBackup(
   target: string,
   targetKind: string,
   schedule?: string,
   actor = "you"
 ): Promise<string> {
-  const docker = await getDocker()
+  // ponytail: record the attempt BEFORE touching Docker. getDocker() throws
+  // when the engine is unreachable, and doing it first meant a failed backup
+  // left no BackupRecord at all — the Backups view stayed empty and the only
+  // evidence was a line in the server's stdout. For a SCHEDULED backup that is
+  // the worst possible failure mode: the operator believes backups are running
+  // while nothing is being written and nothing anywhere says otherwise.
+  const startedAt = Date.now()
+  const retentionDays = await defaultRetentionFor(target, schedule)
   const backup = await db.backupRecord.create({
     data: {
       target,
@@ -1063,62 +1625,203 @@ export async function realBackup(
       status: "running",
       sizeMb: 0,
       schedule: schedule ?? null,
-      retentionDays: 14,
+      retentionDays,
       server: "local",
     },
   })
   await recordActivity("backup", `started backup of ${target}`, { actor })
 
-  try {
-    let sizeMb = 0
-    if (targetKind === "volume") {
-      // tar the volume via a busybox helper container mounting the volume.
-      try {
-        const vol = docker.getVolume(target)
-        await vol.inspect()
-        const helper = await docker.createContainer({
-          Image: "busybox",
-          Cmd: ["sh", "-c", "tar -c /data >/dev/null && echo ok"],
-          HostConfig: { Binds: [`${target}:/data`] },
-        })
-        await helper.start()
-        await helper.wait()
-        await helper.remove({ force: true })
-      } catch {
-        /* volume missing — still record a record */
-      }
-      sizeMb = Math.floor(Math.random() * 4000) + 100
-    } else {
-      // database: best-effort — locate a container named like the db and exec a
-      // generic dump. Per-engine dumpers (pg_dump/mysqldump/…) are a Phase 3
-      // refinement; the record is honest about completion either way.
-      try {
-        const c = docker.getContainer(target)
-        await c.inspect()
-      } catch {
-        /* no matching container — record anyway */
-      }
-      sizeMb = Math.floor(Math.random() * 4000) + 100
-    }
+  const fail = async (message: string): Promise<never> => {
     await db.backupRecord.update({
       where: { id: backup.id },
-      data: { status: "completed", sizeMb, durationMs: 5000, finishedAt: new Date() },
+      data: { status: "failed", finishedAt: new Date(), durationMs: Date.now() - startedAt },
+    })
+    await emit(
+      "backup.failed",
+      "backup",
+      `backup of ${target} failed: ${message}`,
+      { title: "Backup failed", body: `${target}: ${message}`, level: "error", kind: "backup" },
+      { actor }
+    )
+    throw new Error(message)
+  }
+
+  let docker: Docker
+  try {
+    docker = await getDocker()
+  } catch (e) {
+    return await fail(
+      `${(e as Error).message} — start Docker on the host and retry, or the schedule will keep failing.`
+    )
+  }
+
+  try {
+    await ensureBackupVolume(docker)
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-")
+    let bytes = 0
+    let fileName = ""
+
+    if (targetKind === "volume") {
+      const row = await db.volume.findFirst({ where: { name: target } })
+      // The row's dockerVolumeName is the real Docker object; fall back to the
+      // display name so a volume named exactly like its Docker volume still
+      // works (and so an ad-hoc target from the API is usable).
+      const volumeName = row?.dockerVolumeName || target
+      try {
+        await docker.getVolume(volumeName).inspect()
+      } catch {
+        return await fail(
+          `No Docker volume named "${volumeName}" — nothing to archive. The Slipway row may reference a volume that was removed on the host.`
+        )
+      }
+      fileName = `volume-${backupSlug(target)}-${stamp}.tar.gz`
+      const dest = `/backups/${fileName}`
+      const res = await runHelper(docker, {
+        Image: "alpine:latest",
+        Cmd: [
+          "sh",
+          "-c",
+          `tar -czf ${dest} -C /data . && echo SIZE:$(stat -c %s ${dest})`,
+        ],
+        Binds: [`${volumeName}:/data:ro`, `${BACKUP_VOLUME}:/backups`],
+      })
+      if (res.exitCode !== 0) {
+        return await fail(`tar failed (exit ${res.exitCode}): ${res.output.trim().slice(-300)}`)
+      }
+      const size = parseSizeMarker(res.output)
+      if (size === null) return await fail(`archive produced no measurable file: ${res.output.trim().slice(-300)}`)
+      bytes = size
+    } else if (targetKind === "database") {
+      const row = await db.databaseInstance.findFirst({ where: { name: target } })
+      if (!row) return await fail(`No database named "${target}" in Slipway.`)
+      if (!row.dockerContainerId) {
+        return await fail(
+          `"${target}" has no container Slipway can reach (imported or not provisioned), so there is nothing to dump.`
+        )
+      }
+      if (row.status === "external" || !row.password) {
+        return await fail(
+          `"${target}" was imported from an existing container and Slipway does not know its credentials, so it cannot run a dump. Back it up with your own tooling.`
+        )
+      }
+      try {
+        await docker.getContainer(row.dockerContainerId).inspect()
+      } catch {
+        return await fail(`The container for "${target}" is gone — nothing to dump.`)
+      }
+      const ext = backupExtension(row.kind)
+      fileName = `db-${backupSlug(target)}-${stamp}.${ext}`
+      const dest = `/backups/${fileName}`
+      const spec = dumpCommandFor(row.kind, row, dest, ENGINE_SPECS[row.kind]?.internalPort ?? 0)
+      if (!spec) {
+        return await fail(
+          `Slipway has no dump tool for ${row.kind}. Supported: postgres, mysql, mariadb, mongodb, redis, valkey.`
+        )
+      }
+      const res = await runHelper(docker, {
+        Image: ENGINE_SPECS[row.kind].image(row.version),
+        Cmd: ["sh", "-c", `${spec.cmd} && echo SIZE:$(stat -c %s ${dest})`],
+        Env: spec.env,
+        Binds: [`${BACKUP_VOLUME}:/backups`],
+        // share the database container's network namespace so 127.0.0.1 is the
+        // engine regardless of published ports or bridge/overlay networks
+        NetworkMode: `container:${row.dockerContainerId}`,
+      })
+      if (res.exitCode !== 0) {
+        return await fail(`dump failed (exit ${res.exitCode}): ${res.output.trim().slice(-300)}`)
+      }
+      const size = parseSizeMarker(res.output)
+      if (size === null) return await fail(`dump produced no measurable file: ${res.output.trim().slice(-300)}`)
+      bytes = size
+    } else {
+      return await fail(
+        `Unsupported backup target kind "${targetKind}". Slipway backs up volumes and managed databases.`
+      )
+    }
+
+    // An archive of zero bytes means the dump silently produced nothing —
+    // report it rather than recording a "completed" empty backup.
+    if (bytes === 0) {
+      return await fail("the archive came out empty (0 bytes) — treating this as a failed backup, not a completed one")
+    }
+
+    const durationMs = Date.now() - startedAt
+    await db.backupRecord.update({
+      where: { id: backup.id },
+      data: {
+        status: "completed",
+        // sizeMb is an Int column; round up so a sub-megabyte archive doesn't
+        // display as 0 MB and read as "nothing was stored".
+        sizeMb: Math.max(1, Math.round(bytes / 1_000_000)),
+        durationMs,
+        finishedAt: new Date(),
+        fileName,
+      },
     })
     await emit(
       "backup.completed",
       "backup",
-      `backup of ${target} completed`,
-      { title: "Backup completed", body: `${target} snapshot stored.`, level: "success", kind: "backup" },
+      `backup of ${target} completed (${formatBytes(bytes)})`,
+      {
+        title: "Backup completed",
+        body: `${target} → ${fileName} (${formatBytes(bytes)}) in the ${BACKUP_VOLUME} volume.`,
+        level: "success",
+        kind: "backup",
+      },
       { actor }
     )
+    // Retention is part of taking a backup: without pruning, the backup volume
+    // grows until it fills the host disk — the failure mode host-health exists
+    // to diagnose.
+    await pruneBackups(docker, retentionDays).catch((e) =>
+      console.error("[docker-ops] backup prune failed:", (e as Error).message)
+    )
   } catch (e) {
-    await db.backupRecord.update({
-      where: { id: backup.id },
-      data: { status: "failed", finishedAt: new Date() },
-    })
+    // fail() already recorded + notified and threw; anything else is unexpected
+    const current = await db.backupRecord.findUnique({ where: { id: backup.id } })
+    if (current?.status === "running") {
+      await db.backupRecord.update({
+        where: { id: backup.id },
+        data: { status: "failed", finishedAt: new Date(), durationMs: Date.now() - startedAt },
+      })
+    }
     throw e
   }
   return backup.id
+}
+
+/** Human-readable byte size for notification text. */
+function formatBytes(n: number): string {
+  if (n >= 1e9) return `${(n / 1e9).toFixed(2)} GB`
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1)} MB`
+  if (n >= 1e3) return `${(n / 1e3).toFixed(1)} kB`
+  return `${n} B`
+}
+
+/**
+ * Retention for a new record: the matching schedule's value when the backup was
+ * fired by one, otherwise the 14-day default the schema uses.
+ */
+async function defaultRetentionFor(target: string, schedule?: string): Promise<number> {
+  if (!schedule) return 14
+  const row = await db.backupSchedule
+    .findFirst({ where: { target, schedule, active: true } })
+    .catch(() => null)
+  return row?.retentionDays ?? 14
+}
+
+/**
+ * Delete archives older than `retentionDays` from the backup volume, and mark
+ * the corresponding records expired. Best-effort: a prune failure must never
+ * fail the backup that just succeeded.
+ */
+async function pruneBackups(docker: Docker, retentionDays: number): Promise<void> {
+  if (!Number.isFinite(retentionDays) || retentionDays <= 0) return
+  await runHelper(docker, {
+    Image: "alpine:latest",
+    Cmd: ["sh", "-c", `find /backups -type f -mtime +${Math.floor(retentionDays)} -delete 2>/dev/null; echo pruned`],
+    Binds: [`${BACKUP_VOLUME}:/backups`],
+  })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1209,15 +1912,28 @@ const ENGINE_SPECS: Record<string, EngineSpec> = {
     internalPort: 1433,
     dataDir: "/var/opt/mssql",
     defaultUser: "sa",
-    // SA_PASSWORD must be ≥8 chars, upper+lower+digit. Append a fixed suffix
-    // to guarantee complexity regardless of the random portion.
-    env: (u, p) => [`ACCEPT_EULA=Y`, `SA_PASSWORD=${p}Aa1!`, `MSSQL_PID=Express`],
+    // SA_PASSWORD must be ≥8 chars with upper+lower+digit — genPassword()
+    // guarantees that, so the password set here is exactly the one stored on
+    // the row. It previously appended "Aa1!" HERE only, so the container's real
+    // SA password and the password Slipway revealed (and put in the connection
+    // string) differed by that suffix — every revealed MSSQL credential was
+    // unusable.
+    env: (u, p) => [`ACCEPT_EULA=Y`, `SA_PASSWORD=${p}`, `MSSQL_PID=Express`],
     passwordLabel: "SA_PASSWORD",
   },
 }
 
+/**
+ * Generate a database password.
+ *
+ * base64url alone (A-Za-z0-9-_) can, by chance, miss an uppercase or a digit,
+ * which MSSQL rejects (it demands 3 of 4 character classes). The fixed "Aa1"
+ * tail guarantees upper + lower + digit for every engine while staying free of
+ * URI-reserved and shell-metacharacter bytes, so the same value is safe in a
+ * connection string, a `--requirepass` argv, and an env var alike.
+ */
 function genPassword(): string {
-  return randomBytes(18).toString("base64url")
+  return randomBytes(18).toString("base64url") + "Aa1"
 }
 
 function sanitizeDbName(name: string): string {
@@ -1318,8 +2034,7 @@ export async function realProvisionDatabase(
     if (info.State?.Running !== true) {
       let logTail = ""
       try {
-        logTail = (await created.logs({ stdout: true, stderr: true, follow: false }))
-          .toString("utf8")
+        logTail = demuxToString(await created.logs({ stdout: true, stderr: true, follow: false }))
           .split("\n")
           .slice(-6)
           .join(" ")

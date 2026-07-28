@@ -5,7 +5,16 @@ import { recordActivity, emit } from "@/lib/notify"
 export const dynamic = "force-dynamic"
 
 export const GET = route(async () => {
-  return db.backupSchedule.findMany({ orderBy: { createdAt: "desc" } })
+  // ponytail: only ACTIVE schedules. DELETE below deactivates rather than
+  // deleting (the row is the audit trail for the backups it fired), but this
+  // listed every row regardless — so a deleted schedule stayed on the Backups
+  // view forever and "delete" looked like it had silently failed. The scheduler
+  // already filters on active:true, so the row was genuinely off; only the
+  // display was wrong.
+  return db.backupSchedule.findMany({
+    where: { active: true },
+    orderBy: { createdAt: "desc" },
+  })
 })
 
 export const POST = route(async (req, _params, auth) => {
@@ -24,8 +33,11 @@ export const POST = route(async (req, _params, auth) => {
   await recordActivity("backup", `scheduled backup of ${target}: ${schedule} (keep ${sched.retentionDays} days)`, {
     actor: auth.username,
   })
+  // ponytail: "system", not "backup.completed" — this event fans out to Slack /
+  // PagerDuty / webhooks, and announcing a *completed backup* when all that
+  // happened is a schedule being created is a false alert to an on-call rotation.
   await emit(
-    "backup.completed",
+    "system",
     "backup",
     `scheduled backup of ${target}: ${schedule}`,
     {

@@ -67,7 +67,7 @@ export const PATCH = route(async (req, _params, auth) => {
     }
   }
   return { ok: true }
-})
+}, { action: "admin" })
 
 // helper exported for the auth layer to verify a bcrypt password
 export async function verifyPassword(plaintext: string, hash: string | null): Promise<boolean> {

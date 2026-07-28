@@ -25,4 +25,4 @@ export const POST = route(async (_req, _params, auth) => {
 
   await recordActivity("security", `began 2FA setup for ${user.username}`, { actor: auth.username })
   return { secret, qr, otpauth }
-})
+}, { action: "admin" })

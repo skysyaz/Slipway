@@ -7,6 +7,13 @@ import { verify as verifyTotp } from "otplib"
 import { db } from "./db"
 
 /**
+ * Clock-skew allowance for TOTP verification, in seconds. One 30s period each
+ * way. Shared by the sign-in gate here and the 2FA enrolment confirmation in
+ * /api/auth/2fa/verify so both accept the same codes.
+ */
+export const TOTP_TOLERANCE_SECONDS = 30
+
+/**
  * Slipway auth — NextAuth v4.
  * - Credentials provider: username + bcrypt-hashed password (admin seeded).
  * - GitHub / GitLab OAuth: enabled only when client id/secret are set in env.
@@ -39,7 +46,16 @@ export const authOptions: NextAuthOptions = {
           if (!totp) return null
           let totpOk = false
           try {
-            const res = await verifyTotp({ token: totp, secret: user.totpSecret })
+            const res = await verifyTotp({
+              token: totp,
+              secret: user.totpSecret,
+              // otplib defaults epochTolerance to 0 — the code is only valid
+              // inside its exact 30s window. Any clock drift between the server
+              // and the authenticator app (or a code typed as the window rolls)
+              // then rejects a correct code. One period of tolerance is the
+              // RFC 6238 recommendation.
+              epochTolerance: TOTP_TOLERANCE_SECONDS,
+            })
             totpOk = res.valid === true
           } catch {
             totpOk = false

@@ -267,6 +267,8 @@ export interface BackupRecord {
   schedule?: string
   retentionDays: number
   server: string
+  /** Archive produced inside the `slipway-backups` Docker volume, when one was. */
+  fileName?: string
 }
 
 export interface BackupSchedule {
