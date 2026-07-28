@@ -123,16 +123,16 @@ export function DomainsView() {
               i !== allDomains.length - 1 && 'border-b border-border',
             )}
           >
-            <div className="col-span-4">
-              <div className="font-mono font-medium truncate flex items-center gap-1.5">
+            <div className="col-span-4 min-w-0">
+              <div className="font-mono font-medium truncate flex items-center gap-1.5" title={d.hostname}>
                 {d.https && <ShieldCheck size={11} className="text-emerald-500 shrink-0" />}
                 {d.hostname}
                 <ExternalLink size={10} className="text-muted-foreground shrink-0" />
               </div>
             </div>
-            <div className="col-span-2 flex items-center gap-1.5">
+            <div className="col-span-2 flex items-center gap-1.5 min-w-0">
               <StackGlyph stack={d.project.stack} size={18} />
-              <span className="text-[11px] truncate">{d.project.name}</span>
+              <span className="text-[11px] truncate" title={d.project.name}>{d.project.name}</span>
             </div>
             <div className="col-span-2">
               <Badge variant="outline" className="text-[10px] capitalize">{d.type}</Badge>

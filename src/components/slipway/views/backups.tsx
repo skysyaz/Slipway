@@ -93,9 +93,9 @@ export function BackupsView() {
         </div>
         {backups.map((b, i) => (
           <div key={b.id} className={cn('grid grid-cols-12 px-4 py-2.5 items-center text-[12px] hover:bg-accent/30 transition-colors', i !== backups.length - 1 && 'border-b border-border')}>
-            <div className="col-span-3">
-              <div className="font-mono truncate">{b.target}</div>
-              <div className="text-[10px] text-muted-foreground mt-0.5 font-mono">{b.server}</div>
+            <div className="col-span-3 min-w-0">
+              <div className="font-mono truncate" title={b.target}>{b.target}</div>
+              <div className="text-[10px] text-muted-foreground mt-0.5 font-mono truncate">{b.server}</div>
             </div>
             <div className="col-span-2">
               <Badge variant="outline" className="text-[10px] capitalize">{b.targetKind}</Badge>

@@ -82,6 +82,24 @@ async function getDocker(): Promise<Docker> {
 let hostDiskCache: { t: number; total: number; used: number } | null = null
 const HOST_DISK_TTL = 60_000
 
+// ponytail: ONE bytes→GB helper for every disk display (storage host, per-server
+// disk, cluster disk). Decimal GB (bytes / 1e9) to match what BytesShort renders.
+// Round at the DISPLAY layer, not here, so aggregation sums full precision.
+export function bytesToGb(bytes: number): number {
+  return bytes / 1e9
+}
+
+// Public wrapper around getHostDisk: returns the real host-disk {totalBytes,
+// usedBytes} or null when the engine is down. Cached 60s so the 5s poll that
+// hits /api/servers doesn't spawn a `df` container each time. (bug 2/4)
+export async function getHostDiskUsage(): Promise<{ totalBytes: number; usedBytes: number } | null> {
+  try {
+    return await getHostDisk(await getDocker())
+  } catch {
+    return null
+  }
+}
+
 async function getHostDisk(docker: Docker): Promise<{ totalBytes: number; usedBytes: number } | null> {
   if (hostDiskCache && Date.now() - hostDiskCache.t < HOST_DISK_TTL) {
     return { totalBytes: hostDiskCache.total, usedBytes: hostDiskCache.used }

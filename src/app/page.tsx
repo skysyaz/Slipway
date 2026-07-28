@@ -29,6 +29,7 @@ import { useSlipway } from '@/lib/slipway/store'
 import { useAuth } from '@/components/slipway/auth-provider'
 import { CommandPalette } from '@/components/slipway/command-palette'
 import { MobileNav } from '@/components/slipway/mobile-nav'
+import { FloatingLayerProvider } from '@/lib/slipway/dismiss'
 
 function AppShell() {
   const view = useSlipway((s) => s.view)
@@ -68,6 +69,7 @@ function AppShell() {
   }, [hydrate, refetchAll])
 
   return (
+    <FloatingLayerProvider>
     <div className="min-h-screen flex bg-background">
       <Sidebar />
       <div className="flex-1 flex flex-col min-w-0">
@@ -109,6 +111,7 @@ function AppShell() {
       <AllDialogs />
       <CommandPalette />
     </div>
+    </FloatingLayerProvider>
   )
 }
 

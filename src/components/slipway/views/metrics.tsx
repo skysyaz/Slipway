@@ -245,7 +245,7 @@ export function MetricsView() {
                 <div className="grid grid-cols-3 gap-3">
                   <ResourceBar label="CPU" pct={cpuPct} value={`${cpuPct}% of ${s.cpuCores} cores`} color="oklch(0.65 0.18 250)" />
                   <ResourceBar label="Memory" pct={memPct} value={`${Math.round((memPct / 100) * s.memoryGb)} / ${s.memoryGb} GB`} color="oklch(0.65 0.22 300)" />
-                  <ResourceBar label="Disk" pct={diskPct} value={`${diskPct}% · ${s.diskUsedGb}/${s.diskGb} GB`} color={diskPct > 80 ? 'oklch(0.65 0.22 25)' : 'oklch(0.7 0.17 158)'} />
+                  <ResourceBar label="Disk" pct={diskPct} value={`${diskPct}% · ${s.diskUsedGb.toFixed(1)}/${s.diskGb.toFixed(1)} GB`} color={diskPct > 80 ? 'oklch(0.65 0.22 25)' : 'oklch(0.7 0.17 158)'} />
                 </div>
               </div>
             )

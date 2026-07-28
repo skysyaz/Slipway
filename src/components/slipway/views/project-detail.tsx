@@ -734,9 +734,9 @@ function EnvTab({ project }: { project: Project }) {
         )}
         {vars.map((v) => (
           <div key={v.id} className="grid grid-cols-12 gap-2 px-3 py-2 items-center border-b border-border last:border-b-0 hover:bg-accent/30 transition-colors">
-            <div className="col-span-3 font-mono text-[12px] truncate">{v.key}</div>
-            <div className="col-span-6 font-mono text-[12px] truncate text-muted-foreground flex items-center gap-2">
-              <span className="truncate">{revealed[v.id] ? v.value : (v.masked ? '••••••••' : v.value)}</span>
+            <div className="col-span-3 min-w-0 font-mono text-[12px] truncate" title={v.key}>{v.key}</div>
+            <div className="col-span-6 min-w-0 font-mono text-[12px] truncate text-muted-foreground flex items-center gap-2">
+              <span className="truncate" title={revealed[v.id] ? v.value : undefined}>{revealed[v.id] ? v.value : (v.masked ? '••••••••' : v.value)}</span>
               <button onClick={() => copyVal(v.value)} title="Copy"><Copy size={10} /></button>
               {v.masked && (
                 <button onClick={() => setRevealed((r) => ({ ...r, [v.id]: !r[v.id] }))} title="Reveal">
@@ -946,12 +946,12 @@ function ProjectBackupsTab({ project, onRunBackup }: { project: Project; onRunBa
         ) : (
           backups.map((b, i) => (
             <div key={b.id} className={cn('grid grid-cols-12 px-3 py-2.5 items-center text-[12px]', i !== backups.length - 1 && 'border-b border-border')}>
-              <div className="col-span-3 font-mono truncate">{b.target}</div>
+              <div className="col-span-3 min-w-0 font-mono truncate" title={b.target}>{b.target}</div>
               <div className="col-span-2">
                 <StatusDot status={b.status} />
               </div>
               <div className="col-span-2 font-mono">{b.sizeMb > 0 ? `${(b.sizeMb / 1024).toFixed(2)} GB` : '—'}</div>
-              <div className="col-span-3 font-mono text-muted-foreground">{b.schedule ?? 'manual'}</div>
+              <div className="col-span-3 min-w-0 font-mono truncate text-muted-foreground">{b.schedule ?? 'manual'}</div>
               <div className="col-span-2 text-right text-muted-foreground">
                 <TimeAgo ts={b.startedAt} className="text-[11px]" />
               </div>

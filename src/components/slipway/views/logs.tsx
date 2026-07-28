@@ -145,20 +145,20 @@ export function LogsView() {
         ref={containerRef}
         className="rounded-xl border border-border bg-[oklch(0.12_0.005_240)] font-mono text-[12px] h-[560px] overflow-y-auto"
       >
-        <div className="grid grid-cols-[80px_60px_120px_1fr] gap-3 px-3 py-2 border-b border-white/5 text-[10px] uppercase tracking-wider text-muted-foreground/60 font-semibold sticky top-0 bg-[oklch(0.12_0.005_240)] z-10">
+        <div className="grid grid-cols-[80px_60px_120px_minmax(0,1fr)] gap-3 px-3 py-2 border-b border-white/5 text-[10px] uppercase tracking-wider text-muted-foreground/60 font-semibold sticky top-0 bg-[oklch(0.12_0.005_240)] z-10">
           <div>Time</div>
           <div>Level</div>
           <div>Service</div>
           <div>Message</div>
         </div>
         {filtered.map((l) => (
-          <div key={l.id} className="log-line grid grid-cols-[80px_60px_120px_1fr] gap-3 px-3 py-1 hover:bg-white/5">
-            <span className="text-muted-foreground/60">
+          <div key={l.id} className="log-line grid grid-cols-[80px_60px_120px_minmax(0,1fr)] gap-3 px-3 py-1 hover:bg-white/5">
+            <span className="text-muted-foreground/60 whitespace-nowrap tabular-nums">
               {new Date(l.ts).toISOString().slice(11, 23)}
             </span>
-            <span className={cn('uppercase font-medium', levelColor[l.level])}>{l.level}</span>
-            <span className="text-muted-foreground/80">{l.service}</span>
-            <span className="break-all">{l.message}</span>
+            <span className={cn('uppercase font-medium whitespace-nowrap', levelColor[l.level])}>{l.level}</span>
+            <span className="text-muted-foreground/80 whitespace-nowrap">{l.service}</span>
+            <span className="min-w-0 whitespace-pre-wrap break-words [overflow-wrap:anywhere] [word-break:break-word]">{l.message}</span>
           </div>
         ))}
       </div>

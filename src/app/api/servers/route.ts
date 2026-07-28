@@ -2,12 +2,29 @@ import { route } from "@/lib/http"
 import { db } from "@/lib/db"
 import { serializeServer } from "@/lib/serialize"
 import { emit } from "@/lib/notify"
+import { getHostDiskUsage, bytesToGb } from "@/lib/docker-ops"
 
 export const dynamic = "force-dynamic"
 
 export const GET = route(async () => {
   const servers = await db.server.findMany({ orderBy: { createdAt: "asc" } })
-  return servers.map(serializeServer)
+  // ponytail: bug 2/4 — the Server rows store a stale hardcoded diskGb=200 /
+  // diskUsedGb=0 that's never collected, so every disk card shows "0/200 GB".
+  // This is a single-node self-hosted deploy, so the local host server's real
+  // disk (read via a throwaway `df` container, cached 60s) overrides the stored
+  // fiction. Remote/offline servers keep their stored values (no agent to read
+  // them). The cluster card sums these, so with one server it matches exactly.
+  const host = await getHostDiskUsage()
+  const isLocalHost = (s: { ip: string; hostname: string; name: string }) =>
+    s.ip === "127.0.0.1" || s.hostname === "localhost" || s.name === "local"
+  return servers.map((s) => {
+    const out = serializeServer(s)
+    if (host && isLocalHost(s)) {
+      out.diskGb = bytesToGb(host.totalBytes)
+      out.diskUsedGb = bytesToGb(host.usedBytes)
+    }
+    return out
+  })
 })
 
 export const POST = route(async (req, _params, auth) => {

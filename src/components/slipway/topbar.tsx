@@ -27,6 +27,7 @@ import { useAuth } from './auth-provider'
 import { Kbd, TimeAgo } from './format'
 import { cn } from '@/lib/utils'
 import type { Environment } from '@/lib/slipway/types'
+import { useDismiss } from '@/lib/slipway/dismiss'
 
 export function Topbar() {
   const { theme, toggleTheme } = useTheme()
@@ -38,6 +39,7 @@ export function Topbar() {
   const setCommandOpen = useSlipway((s) => s.setCommandOpen)
   const notifications = useSlipway((s) => s.notifications)
   const unread = notifications.filter((n) => !n.read).length
+  const notifTriggerRef = React.useRef<HTMLButtonElement>(null)
 
   return (
     <header className="sticky top-0 z-30 h-14 border-b border-border bg-background/85 backdrop-blur-md">
@@ -72,11 +74,14 @@ export function Topbar() {
         {/* Notifications */}
         <div className="relative">
           <Button
+            ref={notifTriggerRef}
             variant="ghost"
             size="icon"
             className="h-9 w-9 relative"
             onClick={() => setNotifOpen(!notifOpen)}
             aria-label="Notifications"
+            aria-haspopup="menu"
+            aria-expanded={notifOpen}
           >
             <Bell size={16} />
             {unread > 0 && (
@@ -85,7 +90,7 @@ export function Topbar() {
               </span>
             )}
           </Button>
-          {notifOpen && <NotificationsPanel onClose={() => setNotifOpen(false)} />}
+          {notifOpen && <NotificationsPanel onClose={() => setNotifOpen(false)} triggerRef={notifTriggerRef} />}
         </div>
 
         {/* Theme toggle */}
@@ -118,36 +123,35 @@ function UserMenu() {
   // initial for the avatar — admin → "AD"
   const initials = (user?.username ?? 'admin').slice(0, 2).toUpperCase()
   const anyOverlay = useAnyOverlayOpen()
+  const triggerRef = React.useRef<HTMLButtonElement>(null)
+  const contentRef = React.useRef<HTMLDivElement>(null)
 
   // ponytail: auto-close this local dropdown the moment any store overlay
-  // (dialog / command palette / notifications) opens — only one panel on screen.
+  // (dialog / command palette / notifications) opens via a NON-pointer path
+  // (e.g. the ⌘K keyboard shortcut) — the dismiss layer handles the pointer
+  // path, but a keyboard-opened store overlay fires no pointerdown.
   React.useEffect(() => {
     if (anyOverlay) setOpen(false)
   }, [anyOverlay])
-  // Escape closes the open dropdown; listener is added only while open and
-  // removed on close + unmount (bug 2 — no leaked listener).
-  React.useEffect(() => {
-    if (!open) return
-    const h = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false)
-    }
-    window.addEventListener('keydown', h)
-    return () => window.removeEventListener('keydown', h)
-  }, [open])
+  // ponytail: outside-click + Escape + mutual exclusivity via the shared
+  // dismiss layer (see dismiss.tsx). Replaces the old full-screen backdrop +
+  // per-component keydown listener.
+  useDismiss({ open, onClose: () => setOpen(false), contentRef, triggerRef })
 
   return (
     <div className="relative">
       <button
+        ref={triggerRef}
         onClick={() => setOpen(!open)}
         className="h-9 w-9 rounded-full bg-gradient-to-br from-emerald-400 to-emerald-600 text-emerald-950 font-semibold text-xs flex items-center justify-center shrink-0 hover:ring-2 hover:ring-primary/30 transition-all"
         aria-label="Account menu"
+        aria-haspopup="menu"
+        aria-expanded={open}
       >
         {initials}
       </button>
       {open && (
-        <>
-          <div className="fixed inset-0 z-30" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-full mt-1.5 w-64 rounded-lg border border-border bg-popover shadow-xl z-40 p-1.5">
+        <div ref={contentRef} className="absolute right-0 top-full mt-1.5 w-64 rounded-lg border border-border bg-popover shadow-xl z-40 p-1.5">
             <div className="px-2.5 py-2 border-b border-border mb-1">
               <div className="flex items-center gap-2.5">
                 <div className="h-9 w-9 rounded-full bg-gradient-to-br from-emerald-400 to-emerald-600 text-emerald-950 font-semibold text-xs flex items-center justify-center shrink-0">
@@ -192,7 +196,6 @@ function UserMenu() {
               </button>
             </div>
           </div>
-        </>
       )}
     </div>
   )
@@ -208,25 +211,23 @@ function EnvToggle({ env, onChange }: { env: Environment | 'all'; onChange: (e: 
   ]
   const current = options.find((o) => o.id === env)
   const isAll = env === 'all'
+  const triggerRef = React.useRef<HTMLButtonElement>(null)
+  const contentRef = React.useRef<HTMLDivElement>(null)
 
-  // ponytail: same auto-close + Escape discipline as UserMenu (bugs 1 & 2).
+  // ponytail: same auto-close + dismiss layer as UserMenu (bugs 1 & 2).
   React.useEffect(() => {
     if (anyOverlay) setOpen(false)
   }, [anyOverlay])
-  React.useEffect(() => {
-    if (!open) return
-    const h = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false)
-    }
-    window.addEventListener('keydown', h)
-    return () => window.removeEventListener('keydown', h)
-  }, [open])
+  useDismiss({ open, onClose: () => setOpen(false), contentRef, triggerRef })
 
   return (
     <div className="relative">
       <button
+        ref={triggerRef}
         onClick={() => setOpen(!open)}
         className="h-9 flex items-center gap-2 px-3 rounded-md border border-border bg-muted/40 hover:bg-muted/70 text-sm transition-colors"
+        aria-haspopup="menu"
+        aria-expanded={open}
       >
         {current && (
           <span
@@ -238,9 +239,7 @@ function EnvToggle({ env, onChange }: { env: Environment | 'all'; onChange: (e: 
         <ChevronDown size={14} className="text-muted-foreground" />
       </button>
       {open && (
-        <>
-          <div className="fixed inset-0 z-30" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-full mt-1.5 w-52 rounded-lg border border-border bg-popover shadow-xl z-40 p-1.5">
+        <div ref={contentRef} className="absolute right-0 top-full mt-1.5 w-52 rounded-lg border border-border bg-popover shadow-xl z-40 p-1.5">
             <div className="px-2 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">
               Environment
             </div>
@@ -275,23 +274,19 @@ function EnvToggle({ env, onChange }: { env: Environment | 'all'; onChange: (e: 
               </button>
             </div>
           </div>
-        </>
       )}
     </div>
   )
 }
 
-function NotificationsPanel({ onClose }: { onClose: () => void }) {
+function NotificationsPanel({ onClose, triggerRef }: { onClose: () => void; triggerRef: React.RefObject<HTMLButtonElement | null> }) {
   const notifications = useSlipway((s) => s.notifications)
   const markAllRead = useSlipway((s) => s.markAllNotifsRead)
+  const contentRef = React.useRef<HTMLDivElement>(null)
 
-  React.useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
-    }
-    window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
-  }, [onClose])
+  // ponytail: outside-click + Escape + mutual exclusivity via the shared
+  // dismiss layer. Replaces the old full-screen backdrop + keydown listener.
+  useDismiss({ open: true, onClose, contentRef, triggerRef })
 
   const iconFor = (level: string) => {
     switch (level) {
@@ -307,9 +302,7 @@ function NotificationsPanel({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <>
-      <div className="fixed inset-0 z-30" onClick={onClose} />
-      <div className="absolute right-0 top-full mt-1.5 w-[380px] max-h-[480px] rounded-lg border border-border bg-popover shadow-xl z-40 flex flex-col">
+    <div ref={contentRef} className="absolute right-0 top-full mt-1.5 w-[380px] max-h-[480px] rounded-lg border border-border bg-popover shadow-xl z-40 flex flex-col">
         <div className="h-10 px-3 flex items-center justify-between border-b border-border">
           <div className="text-sm font-semibold">Notifications</div>
           <button
@@ -350,6 +343,5 @@ function NotificationsPanel({ onClose }: { onClose: () => void }) {
           </button>
         </div>
       </div>
-    </>
   )
 }

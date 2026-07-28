@@ -4,6 +4,24 @@ import { isDockerAvailable, dockerClient } from "@/lib/docker"
 export const dynamic = "force-dynamic"
 export const runtime = "nodejs"
 
+// ponytail: ONE log sanitizer (bug 3). Raw Docker log lines carry ANSI color
+// escapes (and occasional OSC/cursor sequences) which render as □□□ (tofu) in
+// the browser. Strip every escape variant + non-printable control chars (keep
+// \t) so the viewer shows clean text. Shared here (the only producer of log
+// lines) so the client never has to re-sanitize.
+const ANSI = [
+  /\x1b\[[0-9;?]*[a-zA-Z]/g, // CSI: colors, cursor moves
+  /\x1b\][^\x07]*(\x07|\x1b\\)/g, // OSC (title/set-icon) terminated by BEL or ST
+  /\x1b[=>]/g, // keypad modes
+  /\x1b[NOPDEHM78]/g, // single-char C1 controls
+]
+const CTRL = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g // keep \t (0x09) and \n (split already)
+function sanitizeLogLine(s: string): string {
+  let out = s
+  for (const re of ANSI) out = out.replace(re, "")
+  return out.replace(CTRL, "")
+}
+
 /**
  * SSE stream of live container logs from the Docker engine. No fallback:
  * with the engine down there are no containers, so the stream reports that and
@@ -65,7 +83,7 @@ export async function GET(req: Request) {
             const lines = buf.split("\n")
             buf = lines.pop() || ""
             for (const line of lines) {
-              const raw = line.replace(/^\d{4}-\d{2}-\d{2}T[\d:.Z-]+ /, "")
+              const raw = sanitizeLogLine(line.replace(/^\d{4}-\d{2}-\d{2}T[\d:.Z-]+ /, ""))
               if (!raw) continue
               send({
                 id: `log-${counter++}`,

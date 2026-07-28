@@ -174,7 +174,7 @@ function ClusterSettings({ onAddServer }: { onAddServer: () => void }) {
                   </div>
                   <div className="flex items-center gap-1">
                     <HardDrive size={11} />
-                    <span className="font-mono">{s.diskUsedGb}/{s.diskGb} GB</span>
+                    <span className="font-mono">{s.diskUsedGb.toFixed(1)}/{s.diskGb.toFixed(1)} GB</span>
                   </div>
                 </div>
                 <Button

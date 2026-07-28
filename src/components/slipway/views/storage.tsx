@@ -97,18 +97,18 @@ export function StorageView() {
           const pct = cap > 0 ? Math.min(100, Math.round((v.usedGb / cap) * 100)) : 0
           return (
             <div key={v.id} className={cn('grid grid-cols-12 px-4 py-3 items-center text-[12px] hover:bg-accent/30 transition-colors', i !== filtered.length - 1 && 'border-b border-border')}>
-              <div className="col-span-3">
-                <div className="font-medium">{v.name}</div>
-                <div className="text-[10px] text-muted-foreground mt-0.5">
+              <div className="col-span-3 min-w-0">
+                <div className="font-medium truncate" title={v.name}>{v.name}</div>
+                <div className="text-[10px] text-muted-foreground mt-0.5 truncate">
                   {project ? `linked: ${project.name}` : 'shared volume'}
                   {v.encrypted && <Lock size={9} className="inline ml-1.5 text-emerald-500" />}
                 </div>
               </div>
-              <div className="col-span-3 font-mono text-[11px] truncate text-muted-foreground">{v.mountPath}</div>
-              <div className="col-span-2">
-                <div className="flex items-center gap-1.5 text-[11px]">
-                  <Server size={11} className="text-muted-foreground" />
-                  <span className="font-mono">{v.server}</span>
+              <div className="col-span-3 min-w-0 font-mono text-[11px] truncate text-muted-foreground" title={v.mountPath}>{v.mountPath}</div>
+              <div className="col-span-2 min-w-0">
+                <div className="flex items-center gap-1.5 text-[11px] min-w-0">
+                  <Server size={11} className="text-muted-foreground shrink-0" />
+                  <span className="font-mono truncate" title={v.server}>{v.server}</span>
                 </div>
               </div>
               <div className="col-span-2">
