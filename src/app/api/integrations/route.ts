@@ -30,7 +30,7 @@ export const POST = route(async (req, _params, auth) => {
   }
   await recordActivity("server", `configured ${kind} integration`, { actor: auth.username })
   return { id: integration.id, kind, active: integration.active, config: maskConfig(kind, JSON.parse(config)) }
-})
+}, { action: "admin" })
 
 export const PATCH = route(async (req, _params, _auth) => {
   const body = await req.json().catch(() => ({}))
@@ -42,14 +42,14 @@ export const PATCH = route(async (req, _params, _auth) => {
     data: { active: body.active !== undefined ? body.active : integration.active },
   })
   return { id: updated.id, kind: updated.kind, active: updated.active }
-})
+}, { action: "admin" })
 
 export const DELETE = route(async (req, _params, _auth) => {
   const kind = req.nextUrl.searchParams.get("kind")
   if (!kind) return new Response(JSON.stringify({ error: "kind required" }), { status: 400 })
   await db.integration.deleteMany({ where: { kind } })
   return { ok: true }
-})
+}, { action: "admin" })
 
 function maskConfig(kind: string, config: Record<string, unknown>): Record<string, unknown> {
   const masked: Record<string, unknown> = {}

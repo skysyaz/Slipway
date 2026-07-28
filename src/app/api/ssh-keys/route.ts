@@ -33,7 +33,7 @@ export const POST = route(async (req, _params, auth) => {
     fingerprint: key.fingerprint,
     createdAt: key.createdAt.toISOString(),
   }
-})
+}, { action: "admin" })
 
 export const DELETE = route(async (req, _params, auth) => {
   const id = req.nextUrl.searchParams.get("id")
@@ -41,7 +41,7 @@ export const DELETE = route(async (req, _params, auth) => {
   await db.sshKey.deleteMany({ where: { id } })
   await recordActivity("server", `deleted SSH key`, { actor: auth.username })
   return { ok: true }
-})
+}, { action: "admin" })
 
 // Best-effort fingerprint (the base64 body's MD5, ssh-keygen style). Not used
 // for security — only to give the UI a recognizable identifier.

@@ -17,6 +17,14 @@ import {
   demuxStream,
   sanitize,
 } from "../src/lib/host-health"
+import { roleAllows, defaultActionFor } from "../src/lib/authz"
+import {
+  backupSlug,
+  shq,
+  parseSizeMarker,
+  dumpCommandFor,
+  backupExtension,
+} from "../src/lib/backup-format"
 
 let n = 0
 const ok = (name: string) => console.log(`  ✓ ${name}`)
@@ -133,6 +141,108 @@ check("sanitize: strips CSI color + control, keeps text + \\t", () => {
   assert.equal(sanitize("\x1b[31mred\x1b[0m text\x00\x07"), "red text")
   assert.equal(sanitize("col1\tcol2\n"), "col1\tcol2\n")
   assert.equal(sanitize("\x1b]0;title\x07clean"), "clean") // OSC title stripped
+})
+
+// ── authz: API token scopes are enforced, not decorative ───────────────────
+// Regression: `can()` existed but had zero callers, so every authenticated
+// principal — including a scope:"read" API token — could delete projects, drop
+// databases and mint admin tokens. These pin the policy the route() wrapper
+// now applies to token-authenticated requests.
+check("authz: read scope can read, but cannot deploy or administer", () => {
+  assert.equal(roleAllows("read", "read"), true)
+  assert.equal(roleAllows("read", "deploy"), false)
+  assert.equal(roleAllows("read", "admin"), false)
+})
+
+check("authz: deploy scope can read + deploy, but not administer", () => {
+  assert.equal(roleAllows("deploy", "read"), true)
+  assert.equal(roleAllows("deploy", "deploy"), true)
+  assert.equal(roleAllows("deploy", "admin"), false)
+})
+
+check("authz: admin scope can do everything", () => {
+  for (const a of ["read", "deploy", "admin"] as const) {
+    assert.equal(roleAllows("admin", a), true)
+  }
+})
+
+check("authz: unknown role degrades to read-only, never to admin", () => {
+  assert.equal(roleAllows("wat", "read"), true)
+  assert.equal(roleAllows("wat", "deploy"), false)
+  assert.equal(roleAllows("", "admin"), false)
+})
+
+check("authz: method defaults — reads are read, mutations are deploy", () => {
+  assert.equal(defaultActionFor("GET"), "read")
+  assert.equal(defaultActionFor("HEAD"), "read")
+  assert.equal(defaultActionFor("POST"), "deploy")
+  assert.equal(defaultActionFor("PATCH"), "deploy")
+  assert.equal(defaultActionFor("PUT"), "deploy")
+  assert.equal(defaultActionFor("DELETE"), "deploy")
+  assert.equal(defaultActionFor("delete"), "deploy") // case-insensitive
+})
+
+// ── backup naming + dump commands ──────────────────────────────────────────
+check("backupSlug: filesystem-safe, never empty", () => {
+  assert.equal(backupSlug("My DB/Name"), "my-db-name")
+  assert.equal(backupSlug("!!!"), "backup")
+  assert.equal(backupSlug("keep.dots_and-dashes"), "keep.dots_and-dashes")
+  // no path separators survive, so a crafted name can't escape /backups
+  assert.ok(!backupSlug("../../etc/passwd").includes("/"))
+})
+
+check("shq: single-quotes values so a password can't break out of sh -c", () => {
+  assert.equal(shq("simple"), "'simple'")
+  assert.equal(shq("it's"), "'it'\\''s'")
+  // The classic injection attempt must end up fully literal: after the opening
+  // quote, every embedded quote is closed-escaped-reopened, so the shell never
+  // sees an unquoted `;`.
+  const evil = "a'; rm -rf /; echo '"
+  const q = shq(evil)
+  assert.ok(q.startsWith("'") && q.endsWith("'"))
+  assert.ok(!/[^\\]'[^\\']/.test(q.slice(1, -1).replace(/'\\''/g, "")))
+  for (const v of ["$(id)", "`id`", "a b; c", "'", "''", ""]) {
+    const out = shq(v)
+    assert.ok(out.startsWith("'") && out.endsWith("'"), `not quoted: ${out}`)
+  }
+})
+
+check("parseSizeMarker: reads the LAST SIZE marker, tolerates noise", () => {
+  assert.equal(parseSizeMarker("SIZE:12345"), 12345)
+  assert.equal(parseSizeMarker("tar: warning\nSIZE:42\n"), 42)
+  // a size printed by an earlier step must not win over the final one
+  assert.equal(parseSizeMarker("SIZE:1\nmore\nSIZE:999"), 999)
+  assert.equal(parseSizeMarker("no marker here"), null)
+  assert.equal(parseSizeMarker(""), null)
+})
+
+check("backupExtension: rdb for key-value stores, sql.gz otherwise", () => {
+  assert.equal(backupExtension("redis"), "rdb")
+  assert.equal(backupExtension("valkey"), "rdb")
+  assert.equal(backupExtension("postgres"), "sql.gz")
+})
+
+check("dumpCommandFor: every supported engine writes the target file", () => {
+  const row = { username: "slipway", password: "p@ssw0rd", dbName: "app" }
+  for (const kind of ["postgres", "mysql", "mariadb", "mongodb", "redis", "valkey"]) {
+    const spec = dumpCommandFor(kind, row, "/backups/x.gz", 5432)
+    assert.ok(spec, `${kind} must be dumpable`)
+    assert.ok(spec!.cmd.includes("/backups/x.gz"), `${kind} must write the target file`)
+    // the password travels in the environment, never on the command line —
+    // otherwise it shows up in `ps` inside the helper container
+    assert.ok(!spec!.cmd.includes("p@ssw0rd"), `${kind} leaked the password into argv`)
+    assert.ok(
+      spec!.env.some((e) => e.includes("p@ssw0rd")),
+      `${kind} must pass the password via env`
+    )
+  }
+})
+
+check("dumpCommandFor: unsupported engines refuse instead of faking a dump", () => {
+  const row = { username: "sa", password: "x", dbName: "d" }
+  assert.equal(dumpCommandFor("mssql", row, "/backups/x", 1433), null)
+  assert.equal(dumpCommandFor("sqlite", row, "/backups/x", 0), null)
+  assert.equal(dumpCommandFor("nonsense", row, "/backups/x", 0), null)
 })
 
 console.log(`\n  ${n} checks passed ✓`)

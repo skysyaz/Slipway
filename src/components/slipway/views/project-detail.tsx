@@ -552,7 +552,18 @@ function ServicesTab({ project, onAddService, onRestart }: { project: Project; o
                 <Button variant="ghost" size="sm" className="h-8 w-8 p-0" title="Restart service" onClick={() => onRestart(svc.id)}>
                   <RotateCcw size={13} />
                 </Button>
-                <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => toast({ title: 'Service actions', description: `Edit/scale/delete ${svc.name}.` })}>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 w-8 p-0"
+                  title="Service actions"
+                  onClick={() =>
+                    toast({
+                      title: 'Not available from the dashboard yet',
+                      description: `Editing, scaling and deleting ${svc.name} individually isn't wired up. Restart works (the button to the left); for the rest use the REST API or docker on the host.`,
+                    })
+                  }
+                >
                   <MoreHorizontal size={14} />
                 </Button>
               </div>

@@ -178,6 +178,13 @@ model Deployment {
   durationMs    Int?
   rollbackOfId  String?
   url           String?
+  // ponytail: the exact image this deployment released, e.g.
+  // `nginx:1.27` or `slipway-web:cmf3x9k2`. Recorded so a ROLLBACK can be real:
+  // rollback re-runs the container from a previous deployment's image. Before
+  // this existed, rollback could only write a "healthy" record and change
+  // nothing, because nothing knew what to roll back TO. Null for compose
+  // deploys (compose owns its own images) and for pre-existing rows.
+  image         String?
   // ponytail: the real reason a deploy failed — the failing step's stderr tail
   // mapped to a human cause + action (Bug 3). Empty on success. Surfaced in the
   // deploy view instead of a generic "error".
@@ -324,6 +331,11 @@ model BackupRecord {
   schedule      String?
   retentionDays Int      @default(14)
   server        String   @default("local")
+  // ponytail: the archive this record produced, inside the `slipway-backups`
+  // Docker volume (e.g. `db-orders-2026-07-28T10-00-00-000Z.sql.gz`). Recorded
+  // so the UI can tell an operator exactly what exists and where, instead of
+  // showing a Download button that never downloaded anything.
+  fileName      String?
   projectId     String?
   project       Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
 }

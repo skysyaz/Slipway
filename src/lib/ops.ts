@@ -4,8 +4,11 @@
  * engine is down or an op fails, the deployment is recorded as failed and the
  * error surfaces honestly.
  *
- * Rollback is metadata-level (records a rollback deployment); a real
- * container rollback re-runs the previous image.
+ * ponytail: rollback used to be the one exception — it pointed at
+ * `simulateRollback`, which wrote a "healthy" rollback record with invented
+ * timings and never touched a container. It now points at realRollback, which
+ * recreates the container from the target deployment's recorded image and fails
+ * honestly when there is nothing to roll back to.
  */
 import {
   realDeploy,
@@ -17,8 +20,9 @@ import {
   realUpdateContainer,
   realReconcile,
   realRestartDatabase,
+  realRollback,
 } from "./docker-ops"
-import { simulateRollback, type DeployOptions } from "./simulate"
+import type { DeployOptions } from "./simulate"
 
 export type { DeployOptions }
 
@@ -31,7 +35,4 @@ export const scaleProject = realScale
 export const updateContainer = realUpdateContainer
 export const reconcileProject = realReconcile
 export const restartDatabase = realRestartDatabase
-
-export async function rollbackDeployment(deploymentId: string, actor = "you") {
-  return simulateRollback(deploymentId, actor)
-}
+export const rollbackDeployment = realRollback

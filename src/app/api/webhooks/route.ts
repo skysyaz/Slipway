@@ -25,11 +25,11 @@ export const POST = route(async (req, _params, auth) => {
   })
   await recordActivity("server", `added webhook ${url} (${events.length} events)`, { actor: auth.username })
   return { id: hook.id, url, events, active: hook.active, createdAt: hook.createdAt.toISOString() }
-})
+}, { action: "admin" })
 
 export const DELETE = route(async (req, _params, _auth) => {
   const id = req.nextUrl.searchParams.get("id")
   if (!id) return new Response(JSON.stringify({ error: "id required" }), { status: 400 })
   await db.webhook.deleteMany({ where: { id } })
   return { ok: true }
-})
+}, { action: "admin" })

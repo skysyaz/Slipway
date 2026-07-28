@@ -270,6 +270,7 @@ export function serializeBackup(b: {
   schedule: string | null
   retentionDays: number
   server: string
+  fileName?: string | null
 }) {
   return {
     id: b.id,
@@ -283,6 +284,7 @@ export function serializeBackup(b: {
     schedule: b.schedule ?? undefined,
     retentionDays: b.retentionDays,
     server: b.server,
+    fileName: b.fileName ?? undefined,
   }
 }
 

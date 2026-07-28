@@ -12,6 +12,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { AlertTriangle, History } from 'lucide-react'
+import { toast } from 'sonner'
 import { useSlipway } from '@/lib/slipway/store'
 import { TimeAgo } from './format'
 
@@ -52,7 +53,27 @@ export function RollbackDialog() {
         <AlertDialogFooter>
           <AlertDialogCancel>Cancel</AlertDialogCancel>
           <AlertDialogAction
-            onClick={() => rollback(target.id)}
+            onClick={(e) => {
+              // ponytail: a rollback can genuinely fail (image pruned off the
+              // host, previous image won't start under the current config) and
+              // the API says so with a 500. This used to call rollback() bare,
+              // so the rejection went unhandled: the dialog closed and the
+              // operator was told nothing at all. Keep the dialog open and
+              // surface the real message.
+              e.preventDefault()
+              void rollback(target.id)
+                .then(() => {
+                  toast.success('Rollback complete', {
+                    description: `${target.projectName} is running ${target.commitSha} again.`,
+                  })
+                })
+                .catch((err: unknown) => {
+                  toast.error('Rollback failed', {
+                    description: err instanceof Error ? err.message : 'Unknown error',
+                  })
+                  setTarget(null)
+                })
+            }}
             className="bg-primary text-primary-foreground hover:bg-primary/90"
           >
             Roll back now

@@ -129,6 +129,7 @@ interface SlipwayState {
   reconcileProject: (projectId: string) => Promise<void>
   runBackup: (target: string, targetKind: BackupRecord['targetKind']) => Promise<void>
   addBackupSchedule: (target: string, schedule: string, retentionDays: number) => Promise<void>
+  deleteBackupSchedule: (id: string) => Promise<void>
   scanHost: () => Promise<{ projects: number; databases: number; volumes: number; domains: number; skipped: number }>
   addServer: (input: Record<string, unknown>) => Promise<void>
   addService: (projectId: string, input: Record<string, unknown>) => Promise<void>
@@ -519,6 +520,11 @@ export const useSlipway = create<SlipwayState>((set, get) => {
   runBackup: async (target, targetKind) => {
     await api.post('/api/backups', { target, targetKind })
     await get().refetch(['backups', 'activity'])
+  },
+
+  deleteBackupSchedule: async (id) => {
+    await api.del(`/api/backups/schedules?id=${encodeURIComponent(id)}`)
+    await get().refetch(['schedules', 'activity'])
   },
 
   addBackupSchedule: async (target, schedule, retentionDays) => {

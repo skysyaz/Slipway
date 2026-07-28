@@ -114,4 +114,4 @@ export const POST = route(async (_req, params, auth) => {
   await db.server.update({ where: { id: server.id }, data: { status: "offline" } })
   await recordActivity("server", `failed to join ${server.name}: ${result.error}`, { actor: auth.username })
   return new Response(JSON.stringify({ ok: false, error: result.error }), { status: 502 })
-})
+}, { action: "admin" })

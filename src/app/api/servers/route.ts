@@ -59,4 +59,4 @@ export const POST = route(async (req, _params, auth) => {
     { actor: auth.username }
   )
   return serializeServer(server)
-})
+}, { action: "admin" })

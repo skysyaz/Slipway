@@ -36,11 +36,11 @@ export const POST = route(async (req, _params, auth) => {
   })
   await recordActivity("server", `added registry "${name}" (${url})`, { actor: auth.username })
   return { id: reg.id, name, url, auth: authMode, hasSecret: Boolean(reg.token || reg.password), createdAt: reg.createdAt.toISOString() }
-})
+}, { action: "admin" })
 
 export const DELETE = route(async (req, _params, _auth) => {
   const id = req.nextUrl.searchParams.get("id")
   if (!id) return new Response(JSON.stringify({ error: "id required" }), { status: 400 })
   await db.registry.deleteMany({ where: { id } })
   return { ok: true }
-})
+}, { action: "admin" })

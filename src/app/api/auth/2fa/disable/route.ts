@@ -18,4 +18,4 @@ export const POST = route(async (req, _params, auth) => {
   await db.user.update({ where: { id: user.id }, data: { totpEnabled: false, totpSecret: null } })
   await recordActivity("security", `disabled 2FA for ${user.username}`, { actor: auth.username })
   return { enabled: false }
-})
+}, { action: "admin" })

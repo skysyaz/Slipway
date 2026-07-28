@@ -148,7 +148,7 @@ export function PreviewsView() {
       <div className="rounded-xl border border-border bg-card p-4">
         <div className="flex items-center justify-between mb-2">
           <div className="text-[13px] font-semibold">Auto-cleanup policy</div>
-          <Button variant="outline" size="sm" className="h-7 text-[11px]" onClick={() => toast({ title: 'Edit cleanup policy', description: 'Cleanup policy editor would open here.' })}>Edit</Button>
+          <Button variant="outline" size="sm" className="h-7 text-[11px]" onClick={() => toast({ title: 'Not implemented', description: 'The preview cleanup policy is fixed in this build — there is no editor behind this button yet.' })}>Edit</Button>
         </div>
         <div className="space-y-2">
           {[
