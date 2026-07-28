@@ -44,7 +44,7 @@ import { useSlipway } from '@/lib/slipway/store'
 import { api, ApiError } from '@/lib/api'
 import { StackGlyph, DbGlyph, StatusDot } from '../icons'
 import { TimeAgo, Duration, Memory, Cpu as CpuFmt, Sparkline, BytesShort, lastV } from '../format'
-import { cn } from '@/lib/utils'
+import { cn, pluralize } from '@/lib/utils'
 import { useToast, toast } from '@/hooks/use-toast'
 import { useDismiss } from '@/lib/slipway/dismiss'
 import type { Project, Deployment, Service } from '@/lib/slipway/types'
@@ -687,7 +687,7 @@ function ServicesTab({
         <div className="min-w-0">
           <h3 className="text-[15px] font-semibold">Services</h3>
           <p className="text-[12px] text-muted-foreground mt-0.5">
-            {project.services.length} services defined in this project. Each can be scaled, restarted, or inspected independently.
+            {pluralize(project.services.length, 'service')} defined in this project. Each can be scaled, restarted, or inspected independently.
           </p>
         </div>
         <Button variant="outline" size="sm" className="h-9 gap-2 shrink-0" onClick={onAddService}>

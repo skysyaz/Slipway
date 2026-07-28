@@ -2119,7 +2119,7 @@ export async function realScale(
   if (!serviceId) {
     await db.project.update({ where: { id: projectId }, data: { status, replicas } })
   }
-  await recordActivity("scale", `scaled ${project.name} to ${replicas} replica(s)`, {
+  await recordActivity("scale", `scaled ${project.name} to ${replicas} ${replicas === 1 ? "replica" : "replicas"}`, {
     projectId,
     actor,
   })
