@@ -46,6 +46,11 @@ export function deriveCertStatus(opts: {
   if (opts.ssl === "disabled" || !opts.https) {
     return { state: "http", label: "HTTP", tone: "neutral", checkedAt: new Date(now).toISOString() }
   }
+  // Self-signed / custom cert on a real hostname (not just IP mode): it is a
+  // working TLS endpoint with an untrusted cert — show Self-signed, never pending.
+  if (opts.ssl === "custom") {
+    return { state: "self-signed", label: "Self-signed", tone: "warn", reason: "Using a custom/self-signed certificate — browsers will warn.", checkedAt: new Date(now).toISOString() }
+  }
   if (opts.status === "failed") {
     return { state: "failed", label: "Cert failed", tone: "error", checkedAt: new Date(now).toISOString() }
   }
