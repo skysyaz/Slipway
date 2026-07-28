@@ -306,6 +306,19 @@ shadcn CLI rather than hand-writing into `src/components/ui/`.
   Enum-ish columns are plain `String` with the allowed values in a comment.
 - Migrations live in `prisma/migrations/`. Prefer `prisma migrate dev` locally;
   the production container runs `prisma db push --accept-data-loss` on boot.
+  **Those two paths can silently diverge** — `db push` syncs straight from
+  `schema.prisma` and ignores history, so a schema column added without a
+  migration works in the container and breaks `migrate deploy` (this happened:
+  `Deployment.kind`, `Deployment.error`, `DeploymentStep.log`,
+  `DatabaseInstance.environment`). After changing the schema, check with:
+
+  ```bash
+  npx prisma migrate diff \
+    --from-url "file:$PWD/prisma/slipway.db" \
+    --to-schema-datamodel prisma/schema.prisma --script
+  ```
+
+  An empty result means the migration history reproduces the schema.
 - `prisma/seed.ts` is idempotent: admin user, the `local` server row, and one
   deployable demo project.
 
@@ -333,6 +346,18 @@ configs are in `proxy/`. `install.sh` is the interactive production installer
 `next.config.ts` sets `output: "standalone"` and **`typescript.ignoreBuildErrors: false`** —
 type errors must fail the build. Don't flip that. ESLint's flat config disables
 most rules, so lint passing is a weak signal; rely on `tsc`/`next build`.
+
+It also sets **`serverExternalPackages: ["ssh2", "dockerode", "docker-modem",
+"cpu-features"]`**. These carry native addons; Turbopack can't put a
+non-ECMAScript asset in an ESM chunk, and without this the build fails with
+`non-ecmascript placeable asset` from `ssh2/lib/protocol/crypto.js`. Add any new
+native-addon dependency to that list.
+
+**`npm ci` does not work on this repo** — `next-auth@4` declares a peerOptional
+on `nodemailer@^7` while the project pins `^9`, and npm refuses to resolve it.
+Bun ignores peer conflicts, which is why `bun.lock` is authoritative. If you need
+an npm tree (e.g. bun is unavailable), `npm install --legacy-peer-deps` works;
+don't commit the resulting `package-lock.json` churn.
 
 ## Environment variables
 
