@@ -66,6 +66,109 @@ async function getDocker(): Promise<Docker> {
   return c
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Real storage snapshot — surfaces honest per-volume usage + the host disk
+// capacity. Docker volumes have no size cap by default, so the "of X" the
+// dashboard used to show was a 20 GB-per-volume fiction. Instead we read:
+//   - per-volume used bytes from `docker system df` (Volumes[].Size)
+//   - the real in-container mount path (Destination) from each container's Mounts
+//   - the host filesystem total/used by running `df -B1 /host` in a throwaway
+//     alpine that bind-mounts / read-only
+// ponytail ceiling: df reports the filesystem holding /, which is where the
+// docker data root lives on a default install; if the operator put the docker
+// root on a separate FS this reflects /, not that FS — honest best-effort.
+// ─────────────────────────────────────────────────────────────────────────────
+
+let hostDiskCache: { t: number; total: number; used: number } | null = null
+const HOST_DISK_TTL = 60_000
+
+async function getHostDisk(docker: Docker): Promise<{ totalBytes: number; usedBytes: number } | null> {
+  if (hostDiskCache && Date.now() - hostDiskCache.t < HOST_DISK_TTL) {
+    return { totalBytes: hostDiskCache.total, usedBytes: hostDiskCache.used }
+  }
+  const run = async (): Promise<{ totalBytes: number; usedBytes: number } | null> => {
+    try {
+      let c: Docker.Container
+      try {
+        c = await docker.createContainer({
+          Image: "alpine:latest",
+          Cmd: ["df", "-B1", "/host"],
+          Tty: true,
+          HostConfig: { Binds: ["/:/host:ro"], AutoRemove: true },
+        })
+      } catch {
+        // alpine not present locally — pull it (one-time ~7 MB) then retry
+        await pullImage(docker, "alpine:latest")
+        c = await docker.createContainer({
+          Image: "alpine:latest",
+          Cmd: ["df", "-B1", "/host"],
+          Tty: true,
+          HostConfig: { Binds: ["/:/host:ro"], AutoRemove: true },
+        })
+      }
+      await c.start()
+      const logs = await c.logs({ stdout: true, stderr: false, follow: false })
+      // Tty=true → logs is a plain Buffer, last line is the /host row
+      const line = logs.toString("utf8").trim().split("\n").pop() || ""
+      const parts = line.split(/\s+/)
+      const total = Number(parts[1])
+      const used = Number(parts[2])
+      if (!total) return null
+      return { totalBytes: total, usedBytes: used }
+    } catch {
+      return null
+    }
+  }
+  const r = await run()
+  if (r) hostDiskCache = { t: Date.now(), total: r.totalBytes, used: r.usedBytes }
+  return r
+}
+
+export async function getStorageSnapshot(): Promise<{
+  volumes: Map<string, { usedBytes: number; mountpoint: string }>
+  mounts: Map<string, string[]>
+  host: { totalBytes: number; usedBytes: number } | null
+}> {
+  const { isDockerAvailable } = await import("./docker")
+  if (!(await isDockerAvailable())) {
+    return { volumes: new Map(), mounts: new Map(), host: null }
+  }
+  const docker = await getDocker().catch(() => null)
+  if (!docker) return { volumes: new Map(), mounts: new Map(), host: null }
+
+  // per-volume real used bytes + host mountpoint
+  const volumes = new Map<string, { usedBytes: number; mountpoint: string }>()
+  try {
+    const df = (await docker.df()) as { Volumes?: { Name?: string; Size?: number; Mountpoint?: string }[] }
+    for (const v of df.Volumes || []) {
+      if (!v.Name) continue
+      volumes.set(v.Name, { usedBytes: Number(v.Size) || 0, mountpoint: v.Mountpoint || "" })
+    }
+  } catch {
+    /* df not supported / unavailable */
+  }
+
+  // in-container mount destinations per volume (from container Mounts)
+  const mounts = new Map<string, string[]>()
+  try {
+    const list = await docker.listContainers({ all: true })
+    for (const c of list) {
+      for (const m of c.Mounts || []) {
+        if (m.Name) {
+          const arr = mounts.get(m.Name) || []
+          if (m.Destination && !arr.includes(m.Destination)) arr.push(m.Destination)
+          mounts.set(m.Name, arr)
+        }
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+
+  const host = await getHostDisk(docker)
+  return { volumes, mounts, host }
+}
+
 /** Pull an image, resolving on completion. */
 async function pullImage(docker: Docker, image: string): Promise<void> {
   await new Promise<void>((resolve, reject) => {
@@ -515,6 +618,114 @@ export async function realRestartDatabase(dbId: string, actor = "you"): Promise<
   await recordActivity("database", `restarted database ${row.name}`, { actor })
 }
 
+// Run a command inside a container and return its exit code + combined output.
+// Used by credential rotation to `docker exec` the engine's CLI.
+async function execInContainer(
+  docker: Docker,
+  containerId: string,
+  cmd: string[]
+): Promise<{ exitCode: number; output: string }> {
+  const exec = await docker.getContainer(containerId).exec({
+    Cmd: cmd,
+    AttachStdout: true,
+    AttachStderr: true,
+  })
+  const stream = await exec.start({ hijack: true, Detach: false })
+  let output = ""
+  await new Promise<void>((resolve) => {
+    const chunks: Buffer[] = []
+    stream.on("data", (c: Buffer) => chunks.push(c))
+    stream.on("end", () => {
+      output = Buffer.concat(chunks).toString("utf8")
+      resolve()
+    })
+    stream.on("error", () => resolve())
+  })
+  const inspectRes = await exec.inspect()
+  // dockerode multiplexed stream — strip the 8-byte header per chunk for a
+  // readable message. ponytail: best-effort parse; we mainly care about exit.
+  const strip = (s: string) =>
+    s.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, "").trim()
+  return { exitCode: inspectRes.ExitCode ?? 0, output: strip(output) || output }
+}
+
+// Set / rotate credentials on a Slipway-managed database by `docker exec`-ing
+// the engine CLI. Slipway knows the admin password for DBs it provisioned
+// (it set the env), so rotation works there. For imported/external DBs it does
+// NOT know the admin password → honest refusal (the user rotates from inside).
+//
+// Engines supported: postgres, mysql, mariadb, mongodb, mssql.
+// redis/valkey: requirepass is baked into the container Cmd, so a live CONFIG
+// SET reverts on restart — rotating them needs a container recreate (honest
+// refusal here, recreate the DB to change its password).
+export async function realSetDatabaseCredentials(
+  dbId: string,
+  patch: { password?: string; username?: string },
+  actor = "you"
+): Promise<{ username: string | null; password: string | null }> {
+  const row = await db.databaseInstance.findUnique({ where: { id: dbId } })
+  if (!row) throw new Error("Database not found")
+  if (!row.dockerContainerId) throw new Error("No real container for this database")
+  if (row.status === "external") {
+    throw new Error("This database was imported — Slipway doesn't know its admin password. Rotate it from inside the container manually.")
+  }
+  const engine = ENGINE_SPECS[row.kind]
+  if (!engine) throw new Error(`Unsupported engine: ${row.kind}`)
+
+  const newPass = patch.password?.trim()
+  if (!newPass) throw new Error("A new password is required")
+  const username = patch.username?.trim() || row.username || engine.defaultUser || ""
+
+  const docker = await getDocker()
+  // mssql SA password = stored raw + "Aa1!" (complexity suffix), see ENGINE_SPECS
+  const isMssql = row.kind === "mssql"
+  const currentAdmin = isMssql ? `${row.password ?? ""}Aa1!` : row.password ?? ""
+  const newAdmin = isMssql ? `${newPass}Aa1!` : newPass
+
+  let cmd: string[]
+  switch (row.kind) {
+    case "postgres":
+      cmd = ["psql", "-U", username, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", `ALTER USER "${username}" WITH PASSWORD '${newPass.replace(/'/g, "''")}';`]
+      break
+    case "mysql":
+    case "mariadb":
+      cmd = ["mysql", "-u", "root", `-p${currentAdmin}`, "-e", `ALTER USER '${username}'@'%' IDENTIFIED BY '${newPass.replace(/'/g, "\\'")}';`]
+      break
+    case "mongodb":
+      cmd = ["mongosh", "--quiet", "-u", "root", "-p", currentAdmin, "--authenticationDatabase", "admin", "--eval", `db.changeUserPassword('${username}','${newPass.replace(/'/g, "\\'")}')`]
+      break
+    case "mssql":
+      cmd = ["/opt/mssql-tools18/bin/sqlcmd", "-S", "localhost", "-U", "sa", "-P", currentAdmin, "-C", "-Q", `ALTER LOGIN [${username}] WITH PASSWORD = '${newAdmin.replace(/'/g, "''")}';`]
+      break
+    case "redis":
+    case "valkey":
+      throw new Error("Rotating a redis/valkey password needs recreating the container (the password is baked into its start command). Delete and recreate the database to change its password.")
+    default:
+      throw new Error(`Credential rotation not implemented for ${row.kind}`)
+  }
+
+  const { exitCode, output } = await execInContainer(docker, row.dockerContainerId, cmd)
+  if (exitCode !== 0) {
+    throw new Error(`engine rejected the credential change (exit ${exitCode}): ${output.slice(0, 300)}`)
+  }
+
+  // store the raw password (without the mssql suffix) so /credentials reveals
+  // exactly what the user set + the suffix they must append for mssql.
+  await db.databaseInstance.update({
+    where: { id: dbId },
+    data: { password: newPass, username },
+  })
+  await recordActivity("database", `rotated credentials for database ${row.name}`, { actor })
+  await emit(
+    "system",
+    "database",
+    `rotated credentials for database ${row.name}`,
+    { title: "Credentials updated", body: `${row.name} password was rotated.`, level: "success", kind: "database" },
+    { actor }
+  )
+  return { username, password: newPass }
+}
+
 export async function realScale(
   projectId: string,
   serviceId: string | undefined,
@@ -724,6 +935,24 @@ function dbContainerName(id: string, name: string): string {
   return `slipway-db-${slug}-${id.slice(-6)}`
 }
 
+// ponytail: pick a free host port so two engines of the same kind don't both
+// try to bind host 5432 (Docker would refuse the second with "port already
+// allocated"). Gathers every host port currently bound by any container, then
+// returns the preferred port if free, else the first free port in the
+// ephemeral range (49152+). Honest — no silent fallback to a colliding port.
+async function pickFreePort(docker: Docker, preferred: number): Promise<number> {
+  const containers = await docker.listContainers({ all: true })
+  const bound = new Set<number>()
+  for (const c of containers) {
+    for (const p of c.Ports || []) if (p.PublicPort) bound.add(p.PublicPort)
+  }
+  if (!bound.has(preferred)) return preferred
+  for (let candidate = 49152; candidate < 65535; candidate++) {
+    if (!bound.has(candidate)) return candidate
+  }
+  throw new Error("no free host port available (49152–65535 all bound)")
+}
+
 /**
  * Provision a real engine container for an existing DatabaseInstance row.
  * Pulls the image, creates + starts the container with credentials env, a
@@ -762,6 +991,11 @@ export async function realProvisionDatabase(
       await docker.createVolume({ Name: volumeName })
     }
 
+    // ponytail: auto-allocate a free host port. The POST route defaults port to
+    // the engine's well-known port (5432…), so without this two postgres DBs
+    // would collide on host 5432. Persist the actual port back to the row so the
+    // connection string and the dashboard show the real binding.
+    const hostPort = await pickFreePort(docker, spec.port || engine.internalPort)
     const env = engine.env(username, password, dbName)
     const created = await docker.createContainer({
       Image: engine.image(spec.version),
@@ -771,7 +1005,7 @@ export async function realProvisionDatabase(
       HostConfig: {
         RestartPolicy: { Name: "unless-stopped" },
         PortBindings: {
-          [`${engine.internalPort}/tcp`]: [{ HostPort: String(spec.port) }],
+          [`${engine.internalPort}/tcp`]: [{ HostPort: String(hostPort) }],
         },
         Binds: [`${volumeName}:${engine.dataDir}`],
       },
@@ -786,6 +1020,7 @@ export async function realProvisionDatabase(
       data: {
         dockerContainerId: created.id,
         host: "localhost",
+        port: hostPort,
         internalPort: engine.internalPort,
         status: "running",
       },
@@ -797,7 +1032,7 @@ export async function realProvisionDatabase(
       `provisioned ${spec.kind} database "${spec.name}"`,
       {
         title: "Database ready",
-        body: `${spec.name} (${spec.kind} ${spec.version}) is running on localhost:${spec.port}.`,
+        body: `${spec.name} (${spec.kind} ${spec.version}) is running on localhost:${hostPort}.`,
         level: "success",
         kind: "database",
       },
@@ -889,9 +1124,10 @@ export async function realRemoveDatabase(
 //    password (status "external"); the credentials route says so honestly.
 //  - volumes → Volume rows (size best-effort 0; Docker doesn't report usage
 //    without a stat call per-volume).
-//  - domains / SSL are NOT detected — those live in the reverse proxy
-//    (Caddy/Traefik/Dokploy), which Slipway doesn't own. Add a proxy-reader
-//    when a specific proxy is in scope.
+//  - domains / SSL → detected from the container's `traefik.http.routers.*`
+//    labels (Host() + tls). On this host Traefik routes by reading those same
+//    labels, so reading them is the honest way to surface imported domains.
+//    Other proxies (Caddy / proxy-manager) are a follow-up.
 //  - skip Slipway-managed resources (name prefix `slipway-`) and anything
 //    already imported (matched by dockerContainerId / volume name).
 // ─────────────────────────────────────────────────────────────────────────────
@@ -935,6 +1171,35 @@ function statusFromState(state: string): string {
   return "stopped"
 }
 
+// Parse `traefik.http.routers.<r>.rule` + `*.tls` labels off a container into
+// { hostname, tls } pairs. A rule can be `Host(\`a.com\`) && Host(\`b.com\`)` or
+// `HostRegexp` etc.; we extract every `Host(\`x\`)` occurrence. tls is on when
+// any router for the container has `traefik.http.routers.<r>.tls` set.
+function detectTraefikDomains(labels: Record<string, string>): { hostname: string; tls: boolean }[] {
+  const routerNames = new Set<string>()
+  const tlsRouter = new Set<string>()
+  for (const k of Object.keys(labels)) {
+    const m = k.match(/^traefik\.http\.routers\.([^.]+)$/)
+    if (m) routerNames.add(m[1])
+    const tm = k.match(/^traefik\.http\.routers\.([^.]+)\.tls$/)
+    if (tm) tlsRouter.add(tm[1])
+  }
+  const out = new Map<string, boolean>()
+  for (const r of routerNames) {
+    const rule = labels[`traefik.http.routers.${r}.rule`]
+    if (!rule) continue
+    const tls = tlsRouter.has(r)
+    // match Host(`x`) and Host(`x`) with backtick delimiters
+    const re = /Host\(\s*`([^`]+)`\s*\)/g
+    let m: RegExpExecArray | null
+    while ((m = re.exec(rule)) !== null) {
+      const h = m[1].trim()
+      if (h) out.set(h, tls || out.get(h) === true)
+    }
+  }
+  return [...out.entries()].map(([hostname, tls]) => ({ hostname, tls }))
+}
+
 export async function realScanHost(actor = "you"): Promise<{
   projects: number
   databases: number
@@ -964,10 +1229,14 @@ export async function realScanHost(actor = "you"): Promise<{
     }
     const image = c.Image || ""
     const dbKind = detectDbKind(image)
-    const publicPort = c.Ports?.find((p) => p.PublicPort)?.PublicPort
+    // ponytail: record the ACTUAL published host port. When the container
+    // publishes nothing on the host, store 0 (sentinel = "not published") — NOT
+    // the internal engine port, which would make the credentials route emit a
+    // misleading `104.214.169.39:5432` external string for a DB that isn't
+    // reachable from outside.
+    const publicPort = c.Ports?.find((p) => p.PublicPort)?.PublicPort ?? 0
 
     if (dbKind) {
-      const port = publicPort ?? DB_DEFAULT_PORT[dbKind] ?? 5432
       await db.databaseInstance.create({
         data: {
           name: name || `${dbKind}-${c.Id.slice(0, 6)}`,
@@ -975,7 +1244,7 @@ export async function realScanHost(actor = "you"): Promise<{
           version: image.split(":")[1]?.split("@")[0] || "latest",
           status: "external", // imported — Slipway didn't provision it, has no password
           host: "localhost",
-          port,
+          port: publicPort, // 0 = not published on a host port
           dockerContainerId: c.Id,
           username: null,
           password: null,
@@ -991,7 +1260,7 @@ export async function realScanHost(actor = "you"): Promise<{
       while (await db.project.findUnique({ where: { slug } })) {
         slug = `${base}-${++n}`
       }
-      await db.project.create({
+      const created = await db.project.create({
         data: {
           name: name || image.split(":")[0].split("/").pop() || "imported-app",
           slug,
@@ -1009,6 +1278,24 @@ export async function realScanHost(actor = "you"): Promise<{
         },
       })
       result.projects++
+      // ponytail: detect domains/SSL from the container's Traefik labels. Domains
+      // live in the reverse proxy, and on this host Traefik routes by reading
+      // `traefik.http.routers.<r>.rule=Host(\`x\`)` + `*.tls` labels off each
+      // container — so reading the same labels is the honest way to surface
+      // imported domains. (Caddy/proxy-manager readers are a follow-up.)
+      const domains = detectTraefikDomains(c.Labels || {})
+      for (const d of domains) {
+        await db.domain.create({
+          data: {
+            projectId: created.id,
+            hostname: d.hostname,
+            type: "primary",
+            ssl: d.tls ? "managed" : "disabled",
+            https: d.tls,
+            status: "active",
+          },
+        })
+      }
     }
   }
 

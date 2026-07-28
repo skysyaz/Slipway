@@ -27,15 +27,18 @@ export function ProjectsView() {
   const projects = useSlipway((s) => s.projects)
   const selectProject = useSlipway((s) => s.selectProject)
   const setNewDeploymentOpen = useSlipway((s) => s.setNewDeploymentOpen)
+  // ponytail: the env filter is the GLOBAL one (topbar EnvToggle + the pills
+  // below), so clicking Production/Staging/Preview in either place actually
+  // filters the list. Previously the topbar set a global `env` that nothing
+  // consumed — clicking it did nothing.
   const env = useSlipway((s) => s.env)
   const setEnv = useSlipway((s) => s.setEnv)
 
   const [query, setQuery] = React.useState('')
   const [view, setView] = React.useState<'grid' | 'list'>('grid')
-  const [envFilter, setEnvFilter] = React.useState<'all' | 'production' | 'staging' | 'preview'>('all')
 
   const filtered = projects.filter((p) => {
-    if (envFilter !== 'all' && p.environment !== envFilter) return false
+    if (env !== 'all' && p.environment !== env) return false
     if (!query) return true
     return (
       p.name.toLowerCase().includes(query.toLowerCase()) ||
@@ -75,10 +78,10 @@ export function ProjectsView() {
           {(['all', 'production', 'staging', 'preview'] as const).map((e) => (
             <button
               key={e}
-              onClick={() => setEnvFilter(e)}
+              onClick={() => setEnv(e)}
               className={cn(
                 'px-2.5 h-8 rounded text-[12px] capitalize transition-colors',
-                envFilter === e ? 'bg-accent text-foreground font-medium' : 'text-muted-foreground hover:text-foreground',
+                env === e ? 'bg-accent text-foreground font-medium' : 'text-muted-foreground hover:text-foreground',
               )}
             >
               {e}

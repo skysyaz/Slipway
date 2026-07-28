@@ -181,14 +181,15 @@ function UserMenu() {
   )
 }
 
-function EnvToggle({ env, onChange }: { env: Environment; onChange: (e: Environment) => void }) {
+function EnvToggle({ env, onChange }: { env: Environment | 'all'; onChange: (e: Environment | 'all') => void }) {
   const [open, setOpen] = React.useState(false)
   const options: { id: Environment; label: string; color: string }[] = [
     { id: 'production', label: 'Production', color: 'oklch(0.7 0.17 158)' },
     { id: 'staging', label: 'Staging', color: 'oklch(0.78 0.16 70)' },
     { id: 'preview', label: 'Preview', color: 'oklch(0.65 0.18 250)' },
   ]
-  const current = options.find((o) => o.id === env)!
+  const current = options.find((o) => o.id === env)
+  const isAll = env === 'all'
 
   return (
     <div className="relative">
@@ -196,11 +197,13 @@ function EnvToggle({ env, onChange }: { env: Environment; onChange: (e: Environm
         onClick={() => setOpen(!open)}
         className="h-9 flex items-center gap-2 px-3 rounded-md border border-border bg-muted/40 hover:bg-muted/70 text-sm transition-colors"
       >
-        <span
-          className="w-2 h-2 rounded-full"
-          style={{ background: current.color, boxShadow: `0 0 0 3px oklch(from ${current.color} l c h / 0.18)` }}
-        />
-        <span className="font-medium">{current.label}</span>
+        {current && (
+          <span
+            className="w-2 h-2 rounded-full"
+            style={{ background: current.color, boxShadow: `0 0 0 3px oklch(from ${current.color} l c h / 0.18)` }}
+          />
+        )}
+        <span className="font-medium">{isAll ? 'All environments' : current?.label ?? 'Environment'}</span>
         <ChevronDown size={14} className="text-muted-foreground" />
       </button>
       {open && (
@@ -228,9 +231,16 @@ function EnvToggle({ env, onChange }: { env: Environment; onChange: (e: Environm
               </button>
             ))}
             <div className="border-t border-border mt-1 pt-1 mt-1">
-              <button className="w-full flex items-center gap-2.5 px-2 h-8 rounded-md text-sm hover:bg-accent transition-colors text-muted-foreground">
+              <button
+                onClick={() => { onChange('all'); setOpen(false) }}
+                className={cn(
+                  'w-full flex items-center gap-2.5 px-2 h-8 rounded-md text-sm hover:bg-accent transition-colors text-muted-foreground',
+                  isAll && 'bg-accent/60',
+                )}
+              >
                 <GitBranch size={14} />
                 <span className="flex-1 text-left">All environments</span>
+                {isAll && <Check size={14} className="text-primary" />}
               </button>
             </div>
           </div>

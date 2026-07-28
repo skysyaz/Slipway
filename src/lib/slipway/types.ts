@@ -11,7 +11,7 @@ export type DeploymentStatus =
   | 'rolled_back'
   | 'cancelled'
 
-export type ServiceStatus = 'running' | 'stopped' | 'degraded' | 'restarting' | 'failed'
+export type ServiceStatus = 'running' | 'stopped' | 'degraded' | 'restarting' | 'failed' | 'paused' | 'external' | 'offline'
 
 export type ServiceKind = 'app' | 'worker' | 'database' | 'cache' | 'cron'
 

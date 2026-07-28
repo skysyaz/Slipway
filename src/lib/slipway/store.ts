@@ -42,8 +42,8 @@ interface SlipwayState {
   selectProject: (id: string) => void
 
   // global filters
-  env: Environment
-  setEnv: (env: Environment) => void
+  env: Environment | 'all'
+  setEnv: (env: Environment | 'all') => void
 
   // data
   projects: Project[]
@@ -93,6 +93,10 @@ interface SlipwayState {
   setNewTokenOpen: (open: boolean) => void
   addServiceOpen: boolean
   setAddServiceOpen: (open: boolean) => void
+  // ponytail: open exactly one dialog at a time — opening one closes the
+  // others. Fixes "click another button, the previously open dialog stays."
+  openDialog: (name: string) => void
+  closeAllDialogs: () => void
 
   // data lifecycle
   hydrate: () => Promise<void>
@@ -152,13 +156,53 @@ async function fetchOrKeep<T>(url: string, keep: T): Promise<T> {
   }
 }
 
+// ponytail: the set of "new X" + add-service dialog flags that are mutually
+// exclusive. openOnly() clears all of them then sets one true.
+type DialogFlag =
+  | 'newDeploymentOpen'
+  | 'newDatabaseOpen'
+  | 'newVolumeOpen'
+  | 'newDomainOpen'
+  | 'newBackupOpen'
+  | 'newBackupScheduleOpen'
+  | 'newPreviewOpen'
+  | 'newServerOpen'
+  | 'newSshKeyOpen'
+  | 'newRegistryOpen'
+  | 'newWebhookOpen'
+  | 'newTokenOpen'
+  | 'addServiceOpen'
+
+const DIALOG_FALSE: Record<DialogFlag, boolean> = {
+  newDeploymentOpen: false,
+  newDatabaseOpen: false,
+  newVolumeOpen: false,
+  newDomainOpen: false,
+  newBackupOpen: false,
+  newBackupScheduleOpen: false,
+  newPreviewOpen: false,
+  newServerOpen: false,
+  newSshKeyOpen: false,
+  newRegistryOpen: false,
+  newWebhookOpen: false,
+  newTokenOpen: false,
+  addServiceOpen: false,
+}
+
+function openOnly(
+  set: (partial: Partial<SlipwayState>) => void,
+  flag: DialogFlag
+) {
+  set({ ...DIALOG_FALSE, [flag]: true })
+}
+
 export const useSlipway = create<SlipwayState>((set, get) => ({
   view: 'overview',
   selectedProjectId: null,
   setView: (view) => set({ view }),
   selectProject: (id) => set({ selectedProjectId: id, view: 'project-detail' }),
 
-  env: 'production',
+  env: 'all',
   setEnv: (env) => set({ env }),
 
   projects: [],
@@ -175,8 +219,13 @@ export const useSlipway = create<SlipwayState>((set, get) => ({
   hydrated: false,
   hydrating: false,
 
+  // ponytail: the "new X" + add-service dialogs are mutually exclusive — opening
+  // one closes the others (fixes "click another button, the previous dialog
+  // stays open"). Each setter, when opening, first clears every sibling flag.
+  // notifOpen / commandOpen are intentionally NOT in this group (they're
+  // separate overlays). Close (open=false) only touches its own flag.
   newDeploymentOpen: false,
-  setNewDeploymentOpen: (open) => set({ newDeploymentOpen: open }),
+  setNewDeploymentOpen: (open) => (open ? openOnly(set, 'newDeploymentOpen') : set({ newDeploymentOpen: false })),
   rollbackTarget: null,
   setRollbackTarget: (d) => set({ rollbackTarget: d }),
   notifOpen: false,
@@ -184,29 +233,50 @@ export const useSlipway = create<SlipwayState>((set, get) => ({
   commandOpen: false,
   setCommandOpen: (open) => set({ commandOpen: open }),
   newDatabaseOpen: false,
-  setNewDatabaseOpen: (open) => set({ newDatabaseOpen: open }),
+  setNewDatabaseOpen: (open) => (open ? openOnly(set, 'newDatabaseOpen') : set({ newDatabaseOpen: false })),
   newVolumeOpen: false,
-  setNewVolumeOpen: (open) => set({ newVolumeOpen: open }),
+  setNewVolumeOpen: (open) => (open ? openOnly(set, 'newVolumeOpen') : set({ newVolumeOpen: false })),
   newDomainOpen: false,
-  setNewDomainOpen: (open) => set({ newDomainOpen: open }),
+  setNewDomainOpen: (open) => (open ? openOnly(set, 'newDomainOpen') : set({ newDomainOpen: false })),
   newBackupOpen: false,
-  setNewBackupOpen: (open) => set({ newBackupOpen: open }),
+  setNewBackupOpen: (open) => (open ? openOnly(set, 'newBackupOpen') : set({ newBackupOpen: false })),
   newBackupScheduleOpen: false,
-  setNewBackupScheduleOpen: (open) => set({ newBackupScheduleOpen: open }),
+  setNewBackupScheduleOpen: (open) => (open ? openOnly(set, 'newBackupScheduleOpen') : set({ newBackupScheduleOpen: false })),
   newPreviewOpen: false,
-  setNewPreviewOpen: (open) => set({ newPreviewOpen: open }),
+  setNewPreviewOpen: (open) => (open ? openOnly(set, 'newPreviewOpen') : set({ newPreviewOpen: false })),
   newServerOpen: false,
-  setNewServerOpen: (open) => set({ newServerOpen: open }),
+  setNewServerOpen: (open) => (open ? openOnly(set, 'newServerOpen') : set({ newServerOpen: false })),
   newSshKeyOpen: false,
-  setNewSshKeyOpen: (open) => set({ newSshKeyOpen: open }),
+  setNewSshKeyOpen: (open) => (open ? openOnly(set, 'newSshKeyOpen') : set({ newSshKeyOpen: false })),
   newRegistryOpen: false,
-  setNewRegistryOpen: (open) => set({ newRegistryOpen: open }),
+  setNewRegistryOpen: (open) => (open ? openOnly(set, 'newRegistryOpen') : set({ newRegistryOpen: false })),
   newWebhookOpen: false,
-  setNewWebhookOpen: (open) => set({ newWebhookOpen: open }),
+  setNewWebhookOpen: (open) => (open ? openOnly(set, 'newWebhookOpen') : set({ newWebhookOpen: false })),
   newTokenOpen: false,
-  setNewTokenOpen: (open) => set({ newTokenOpen: open }),
+  setNewTokenOpen: (open) => (open ? openOnly(set, 'newTokenOpen') : set({ newTokenOpen: false })),
   addServiceOpen: false,
-  setAddServiceOpen: (open) => set({ addServiceOpen: open }),
+  setAddServiceOpen: (open) => (open ? openOnly(set, 'addServiceOpen') : set({ addServiceOpen: false })),
+
+  closeAllDialogs: () => set(DIALOG_FALSE),
+  openDialog: (name) => {
+    const map: Record<string, keyof SlipwayState> = {
+      deployment: 'newDeploymentOpen',
+      database: 'newDatabaseOpen',
+      volume: 'newVolumeOpen',
+      domain: 'newDomainOpen',
+      backup: 'newBackupOpen',
+      backupSchedule: 'newBackupScheduleOpen',
+      preview: 'newPreviewOpen',
+      server: 'newServerOpen',
+      sshKey: 'newSshKeyOpen',
+      registry: 'newRegistryOpen',
+      webhook: 'newWebhookOpen',
+      token: 'newTokenOpen',
+      addService: 'addServiceOpen',
+    }
+    const key = map[name]
+    if (key) openOnly(set, key as DialogFlag)
+  },
 
   hydrate: async () => {
     if (get().hydrating || get().hydrated) return

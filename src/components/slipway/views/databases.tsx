@@ -102,7 +102,6 @@ export function DatabasesView() {
           </Button>
         </div>
       </div>
-
       {/* Quick stats */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
         <QuickStat label="Postgres" value={databases.filter((d) => d.kind === 'postgres').length} icon={DatabaseIcon} color="oklch(0.65 0.18 250)" />
@@ -125,7 +124,12 @@ export function DatabasesView() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
         {filtered.map((db) => {
           const project = projects.find((p) => p.id === db.projectId)
-          const usagePct = Math.round((db.usedGb / db.storageGb) * 100)
+          const usagePct = db.storageGb > 0 ? Math.round((db.usedGb / db.storageGb) * 100) : 0
+          // ponytail: a DB without a dockerContainerId is a stale/imported stub
+          // (e.g. leftover mock rows). Surface it honestly and disable the
+          // container-only actions that would otherwise throw "no container".
+          const noContainer = !db.dockerContainerId
+          const published = db.port && db.port > 0
           return (
             <div key={db.id} className="rounded-xl border border-border bg-card p-4">
               <div className="flex items-start gap-3">
@@ -133,15 +137,19 @@ export function DatabasesView() {
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
                     <span className="text-[14px] font-semibold truncate">{db.name}</span>
-                    <StatusDot status={db.status} />
+                    <StatusDot status={noContainer ? 'offline' : db.status} />
+                    {noContainer && (
+                      <Badge variant="outline" className="text-[9px] text-amber-500 border-amber-500/30 bg-amber-500/10">no container</Badge>
+                    )}
+                    {db.status === 'external' && !noContainer && (
+                      <Badge variant="outline" className="text-[9px] text-muted-foreground">imported</Badge>
+                    )}
                   </div>
                   <div className="text-[11px] text-muted-foreground font-mono mt-0.5">
-                    {db.kind} {db.version} · {db.host}:{db.port}
+                    {db.kind} {db.version} · {published ? `${db.host}:${db.port}` : 'not published on host'}
                   </div>
                 </div>
-                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => toast({ title: 'Database actions', description: `Edit/delete/inspect ${db.name}.` })}>
-                  <MoreHorizontal size={13} />
-                </Button>
+                <DatabaseActions db={db} />
               </div>
 
               <div className="mt-3 flex items-center gap-2 flex-wrap">
@@ -189,7 +197,14 @@ export function DatabasesView() {
                   created <TimeAgo ts={db.createdAt} className="text-[10px]" />
                 </div>
                 <div className="flex items-center gap-1">
-                  <Button variant="outline" size="sm" className="h-7 text-[11px]" onClick={() => restartDatabase(db.id)}>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 text-[11px]"
+                    disabled={noContainer}
+                    title={noContainer ? 'No real container for this database' : undefined}
+                    onClick={() => restartDatabase(db.id)}
+                  >
                     <RotateCcw size={10} className="mr-1" />
                     Restart
                   </Button>
@@ -197,7 +212,6 @@ export function DatabasesView() {
                     <Archive size={10} className="mr-1" />
                     Backup
                   </Button>
-                  <DatabaseActions db={db} />
                 </div>
               </div>
             </div>
@@ -220,6 +234,7 @@ function DatabaseActions({ db }: { db: DatabaseInstance }) {
   const [credsOpen, setCredsOpen] = React.useState(false)
   const [editOpen, setEditOpen] = React.useState(false)
   const [delOpen, setDelOpen] = React.useState(false)
+  const [rotateOpen, setRotateOpen] = React.useState(false)
   const [removeData, setRemoveData] = React.useState(false)
   const [busy, setBusy] = React.useState(false)
 
@@ -231,15 +246,41 @@ function DatabaseActions({ db }: { db: DatabaseInstance }) {
   const NONE = '__none__'
   const [editProject, setEditProject] = React.useState(db.projectId ?? NONE)
   const [editBackups, setEditBackups] = React.useState(db.backupsEnabled)
+  // credential rotation: a new password (required) + optional username
+  const [newPass, setNewPass] = React.useState('')
+  const [newUser, setNewUser] = React.useState('')
+
+  // Rotate works only on a real Slipway-managed container (we know the admin
+  // password to exec the ALTER). Imported/external DBs and stub rows are refused.
+  const canRotate = !!db.dockerContainerId && db.status !== 'external'
 
   const showCreds = async () => {
     setCredsOpen(true)
     setCreds(null)
     try {
-      const c = await api.get<{ username?: string; password?: string; dbName?: string; connectionString: string; externalConnectionString?: string; note?: string }>(`/api/databases/${db.id}/credentials`)
+      const c = await api.get<{ username?: string; password?: string; dbName?: string; connectionString?: string; externalConnectionString?: string; note?: string }>(`/api/databases/${db.id}/credentials`)
       setCreds(c)
     } catch (e) {
       toast({ title: 'Could not load credentials', description: (e as Error).message, variant: 'destructive' })
+    }
+  }
+
+  const doRotate = async () => {
+    if (!newPass.trim()) {
+      toast({ title: 'Enter a new password', variant: 'destructive' })
+      return
+    }
+    setBusy(true)
+    try {
+      await api.post(`/api/databases/${db.id}/credentials`, { password: newPass, username: newUser.trim() || undefined })
+      toast({ title: 'Credentials updated', description: 'Password rotated. Reveal it via Show credentials.' })
+      setRotateOpen(false)
+      setNewPass('')
+      setNewUser('')
+    } catch (e) {
+      toast({ title: 'Could not set credentials', description: (e as Error).message, variant: 'destructive' })
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -285,6 +326,13 @@ function DatabaseActions({ db }: { db: DatabaseInstance }) {
           <DropdownMenuItem onClick={showCreds}>
             <KeyRound size={12} className="mr-2" /> Show credentials
           </DropdownMenuItem>
+          <DropdownMenuItem
+            disabled={!canRotate}
+            title={!canRotate ? 'Only Slipway-managed databases (with a real container) can be rotated from here' : undefined}
+            onClick={() => { setNewPass(''); setNewUser(db.username ?? ''); setRotateOpen(true) }}
+          >
+            <RotateCcw size={12} className="mr-2" /> Set / rotate password
+          </DropdownMenuItem>
           <DropdownMenuItem onClick={() => { setEditName(db.name); setEditProject(db.projectId ?? NONE); setEditBackups(db.backupsEnabled); setEditOpen(true) }}>
             <Pencil size={12} className="mr-2" /> Edit
           </DropdownMenuItem>
@@ -323,6 +371,40 @@ function DatabaseActions({ db }: { db: DatabaseInstance }) {
               {creds.note && <p className="text-[11px] text-amber-600 leading-snug pt-1">{creds.note}</p>}
             </div>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Rotate credentials */}
+      <Dialog open={rotateOpen} onOpenChange={setRotateOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-base">
+              <RotateCcw size={16} className="text-primary" /> Set credentials for {db.name}
+            </DialogTitle>
+            <DialogDescription>
+              Runs the engine&apos;s credential-change command inside the container ({db.kind}). The new password is stored and revealable via Show credentials.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 py-1">
+            <div className="space-y-1.5">
+              <Label className="text-[11px] font-medium">Username {db.username ? `(current: ${db.username})` : ''}</Label>
+              <Input value={newUser} onChange={(e) => setNewUser(e.target.value)} placeholder={db.username || 'slipway'} className="font-mono text-[13px]" />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-[11px] font-medium">New password</Label>
+              <Input type="text" value={newPass} onChange={(e) => setNewPass(e.target.value)} placeholder="new password" className="font-mono text-[13px]" />
+              {db.kind === 'mssql' && <p className="text-[10px] text-amber-600">MSSQL requires complexity; a fixed <code>Aa1!</code> suffix is appended automatically.</p>}
+            </div>
+            <p className="text-[10px] text-muted-foreground leading-snug">
+              The container is not restarted. For redis/valkey this is not supported (the password is baked into the start command) — recreate the database to change it.
+            </p>
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setRotateOpen(false)}>Cancel</Button>
+            <Button disabled={busy || !newPass.trim()} onClick={doRotate} className="gap-2">
+              {busy && <Loader2 size={13} className="animate-spin" />} Apply
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 

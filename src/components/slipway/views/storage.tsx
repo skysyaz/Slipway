@@ -15,6 +15,7 @@ import {
   DropdownMenuSeparator,
 } from '@/components/ui/dropdown-menu'
 import { useSlipway } from '@/lib/slipway/store'
+import { api } from '@/lib/api'
 import { BytesShort } from '../format'
 import { useToast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
@@ -26,10 +27,18 @@ export function StorageView() {
   const setNewVolumeOpen = useSlipway((s) => s.setNewVolumeOpen)
   const { toast } = useToast()
   const [query, setQuery] = React.useState('')
+  // ponytail: real host-disk total/used via a `df` container (see
+  // /api/storage/host). Replaces the old header that summed a 20 GB-per-volume
+  // fiction ("240.0 GB"). Null until the first fetch resolves.
+  const [host, setHost] = React.useState<{ totalGb: number | null; usedGb: number | null } | null>(null)
+  React.useEffect(() => {
+    api.get<{ totalGb: number | null; usedGb: number | null }>('/api/storage/host')
+      .then(setHost)
+      .catch(() => setHost({ totalGb: null, usedGb: null }))
+  }, [])
 
   const filtered = volumes.filter((v) => !query || v.name.includes(query) || v.server.includes(query))
 
-  const totalSize = volumes.reduce((a, v) => a + v.sizeGb, 0)
   const totalUsed = volumes.reduce((a, v) => a + v.usedGb, 0)
 
   return (
@@ -38,7 +47,13 @@ export function StorageView() {
         <div>
           <h1 className="text-[22px] font-semibold tracking-tight">Storage</h1>
           <p className="text-[13px] text-muted-foreground mt-1">
-            {volumes.length} volumes · <BytesShort gb={totalUsed} /> of <BytesShort gb={totalSize} /> used ·{' '}
+            {volumes.length} volumes ·{' '}
+            {host?.usedGb !== null && host?.usedGb !== undefined ? (
+              <><BytesShort gb={host.usedGb} /> of <BytesShort gb={host.totalGb ?? 0} /> used on host</>
+            ) : (
+              <><BytesShort gb={totalUsed} /> in volumes</>
+            )}
+            {' · '}
             {volumes.filter((v) => v.encrypted).length} encrypted
           </p>
         </div>
@@ -75,7 +90,11 @@ export function StorageView() {
         </div>
         {filtered.map((v, i) => {
           const project = projects.find((p) => p.id === v.projectId)
-          const pct = Math.round((v.usedGb / v.sizeGb) * 100)
+          // ponytail: volumes have no size cap; the bar is this volume's share of
+          // the host disk (sizeGb = host total from the live snapshot). When the
+          // snapshot didn't supply a total, fall back to the stored sizeGb.
+          const cap = host?.totalGb ?? v.sizeGb
+          const pct = cap > 0 ? Math.min(100, Math.round((v.usedGb / cap) * 100)) : 0
           return (
             <div key={v.id} className={cn('grid grid-cols-12 px-4 py-3 items-center text-[12px] hover:bg-accent/30 transition-colors', i !== filtered.length - 1 && 'border-b border-border')}>
               <div className="col-span-3">
@@ -98,7 +117,7 @@ export function StorageView() {
                   <span className="text-[10px] font-mono text-muted-foreground shrink-0">{pct}%</span>
                 </div>
                 <div className="text-[10px] text-muted-foreground mt-1 font-mono">
-                  <BytesShort gb={v.usedGb} /> / <BytesShort gb={v.sizeGb} />
+                  <BytesShort gb={v.usedGb} /> used
                 </div>
               </div>
               <div className="col-span-1">
