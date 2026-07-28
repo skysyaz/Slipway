@@ -505,6 +505,13 @@ check("deriveCertStatus: IP mode is never 'Cert pending' and never ACME", () => 
   assert.equal(http.state, "http")
 })
 
+check("deriveCertStatus: custom (self-signed) cert shows Self-signed, never pending", () => {
+  const s = deriveCertStatus({ hostname: "app.example.com", ssl: "custom", status: "active", https: true })
+  assert.equal(s.state, "self-signed")
+  assert.equal(s.tone, "warn")
+  assert.match(s.reason || "", /self-signed/i)
+})
+
 check("deriveCertStatus: pending -> stuck after timeout; active is HTTPS; http for plain", () => {
   const fresh = deriveCertStatus({ hostname: "app.example.com", ssl: "managed", status: "pending", https: true, createdAt: Date.now() - 60_000 })
   assert.equal(fresh.state, "pending")
