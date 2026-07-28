@@ -449,6 +449,10 @@ export function NewVolumeDialog() {
 // =============================================================================
 // Add Domain dialog
 // =============================================================================
+const ipDash = (ip: string) => String(ip).trim().replace(/\./g, '-')
+const HOST_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i
+const IP_RE = /^(\d{1,3}\.){3}\d{1,3}$/
+
 export function NewDomainDialog() {
   const open = useSlipway((s) => s.newDomainOpen)
   const setOpen = useSlipway((s) => s.setNewDomainOpen)
@@ -458,15 +462,51 @@ export function NewDomainDialog() {
   const { toast } = useToast()
   const { submitting, run } = useSubmit()
 
+  const [mode, setMode] = React.useState<'sslip' | 'custom' | 'ip'>('custom')
   const [hostname, setHostname] = React.useState('')
   const [projectId, setProjectId] = React.useState(selectedProjectId || projects[0]?.id || '')
   const [type, setType] = React.useState<'primary' | 'redirect' | 'api'>('primary')
   const [ssl, setSsl] = React.useState(true)
+  const [ipTls, setIpTls] = React.useState<'selfsigned' | 'http'>('selfsigned')
+  const [publicIp, setPublicIp] = React.useState<string | null>(null)
+  const [hostError, setHostError] = React.useState('')
 
   React.useEffect(() => {
-    if (!open) { setHostname(''); setType('primary'); setSsl(true) }
+    if (!open) return
+    void api.get<{ publicIp: string | null }>('/api/server-info').then((r) => setPublicIp(r.publicIp)).catch(() => setPublicIp(null))
+  }, [open])
+
+  React.useEffect(() => {
+    if (!open) { setHostname(''); setType('primary'); setSsl(true); setMode('custom'); setIpTls('selfsigned'); setHostError('') }
     else if (selectedProjectId) setProjectId(selectedProjectId)
   }, [open, selectedProjectId])
+
+  const project = projects.find((p) => p.id === projectId)
+
+  // Resolve the effective hostname per mode.
+  const sslipHost = publicIp && project ? `${project.slug}.${ipDash(publicIp)}.sslip.io` : ''
+  const effectiveHost =
+    mode === 'sslip' ? sslipHost : mode === 'ip' ? publicIp || '' : hostname.trim()
+
+  const validateCustom = (h: string): string => {
+    if (!h) return ''
+    if (/\s/.test(h)) return 'No spaces allowed.'
+    if (/^[a-z]+:\/\//i.test(h)) return 'Remove the scheme (https://).'
+    if (h.includes('/')) return 'Remove the path.'
+    if (h.includes(':')) return 'Remove the port.'
+    if (IP_RE.test(h)) return 'A bare IP is "Server IP (direct)" mode, not a custom domain.'
+    if (!HOST_RE.test(h)) return 'Not a valid hostname (e.g. app.example.com).'
+    return ''
+  }
+  const customError = mode === 'custom' ? validateCustom(hostname) : ''
+
+  const canSubmit =
+    !!projectId &&
+    (mode === 'custom'
+      ? hostname.trim().length > 0 && !customError
+      : mode === 'sslip'
+        ? !!sslipHost
+        : !!publicIp)
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -477,19 +517,72 @@ export function NewDomainDialog() {
             Add domain
           </DialogTitle>
           <DialogDescription>
-            Route a hostname to a project. Slipway provisions and renews TLS certificates via Let's Encrypt automatically.
+            Route a hostname to a project. Slipway writes the Traefik route and provisions TLS.
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4 py-2">
-          <Field label="Hostname" hint="The full domain or subdomain. DNS A record must point at your Slipway server.">
-            <Input
-              value={hostname}
-              onChange={(e) => setHostname(e.target.value)}
-              placeholder="api.helix-api.com"
-              className="font-mono text-[13px]"
-            />
+          <Field label="Domain source">
+            <div className="grid grid-cols-3 gap-2">
+              {(
+                [
+                  { id: 'sslip', label: 'Free subdomain', sub: 'sslip.io' },
+                  { id: 'custom', label: 'My own domain', sub: 'A record' },
+                  { id: 'ip', label: 'Server IP', sub: 'direct' },
+                ] as const
+              ).map((m) => {
+                const disabled = m.id === 'sslip' && !publicIp
+                return (
+                  <button
+                    key={m.id}
+                    type="button"
+                    disabled={disabled}
+                    onClick={() => setMode(m.id)}
+                    title={disabled ? "Set the server's public IP in Settings" : undefined}
+                    className={cn(
+                      'rounded-lg border p-2.5 text-left transition-colors',
+                      mode === m.id ? 'border-primary bg-primary/10' : 'border-border hover:bg-accent',
+                      disabled && 'opacity-50 cursor-not-allowed'
+                    )}
+                  >
+                    <div className="text-[12px] font-medium">{m.label}</div>
+                    <div className="text-[10px] text-muted-foreground">{m.sub}</div>
+                  </button>
+                )
+              })}
+            </div>
           </Field>
+
+          {mode === 'sslip' && (
+            <Field label="Hostname" hint="No DNS setup needed — points at your server via sslip.io. TLS via Let's Encrypt (HTTP-01); sslip.io is shared so rate-limits may apply.">
+              <Input readOnly value={sslipHost || 'Set the server\'s public IP in Settings'} className="font-mono text-[13px] bg-muted/40" />
+            </Field>
+          )}
+
+          {mode === 'custom' && (
+            <Field
+              label="Hostname"
+              hint={
+                publicIp
+                  ? `Add an A record pointing at ${publicIp}. On Cloudflare, set DNS-only (grey cloud) for HTTP-01, or use DNS-01.`
+                  : 'Add an A record pointing at your server IP. On Cloudflare, set DNS-only (grey cloud) for HTTP-01, or use DNS-01.'
+              }
+            >
+              <Input
+                value={hostname}
+                onChange={(e) => { setHostname(e.target.value); setHostError('') }}
+                placeholder="app.example.com"
+                className="font-mono text-[13px]"
+              />
+              {customError && <p className="text-[11px] text-rose-500 mt-1">{customError}</p>}
+            </Field>
+          )}
+
+          {mode === 'ip' && (
+            <Field label="Hostname" hint="Public CAs (incl. Let's Encrypt) do NOT issue certificates for bare IPs.">
+              <Input readOnly value={publicIp || 'Set the server\'s public IP in Settings'} className="font-mono text-[13px] bg-muted/40" />
+            </Field>
+          )}
 
           <div className="grid grid-cols-2 gap-3">
             <Field label="Project">
@@ -514,25 +607,60 @@ export function NewDomainDialog() {
             </Field>
           </div>
 
-          <div className="flex items-center justify-between rounded-lg border border-border p-3">
-            <div className="flex items-center gap-2.5">
-              <ShieldCheck size={15} className="text-emerald-500" />
-              <div>
-                <div className="text-[12px] font-medium">Provision SSL (Let's Encrypt)</div>
-                <div className="text-[11px] text-muted-foreground">Auto-renewed · HTTP→HTTPS redirect enabled</div>
+          {mode !== 'ip' ? (
+            <div className="flex items-center justify-between rounded-lg border border-border p-3">
+              <div className="flex items-center gap-2.5">
+                <ShieldCheck size={15} className="text-emerald-500" />
+                <div>
+                  <div className="text-[12px] font-medium">Provision SSL (Let's Encrypt)</div>
+                  <div className="text-[11px] text-muted-foreground">Auto-renewed · HTTP→HTTPS redirect enabled</div>
+                </div>
+              </div>
+              <Switch checked={ssl} onCheckedChange={setSsl} />
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <div className="text-[12px] font-medium">Encryption</div>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIpTls('selfsigned')}
+                  className={cn('rounded-lg border p-3 text-left transition-colors', ipTls === 'selfsigned' ? 'border-amber-500 bg-amber-500/10' : 'border-border hover:bg-accent')}
+                >
+                  <div className="text-[12px] font-medium flex items-center gap-1.5"><ShieldCheck size={12} className="text-amber-500" />Self-signed HTTPS</div>
+                  <div className="text-[10px] text-amber-600 mt-0.5">Browsers show a security warning; fine for internal/admin.</div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIpTls('http')}
+                  className={cn('rounded-lg border p-3 text-left transition-colors', ipTls === 'http' ? 'border-primary bg-primary/10' : 'border-border hover:bg-accent')}
+                >
+                  <div className="text-[12px] font-medium">Plain HTTP</div>
+                  <div className="text-[10px] text-muted-foreground mt-0.5">Not encrypted.</div>
+                </button>
               </div>
             </div>
-            <Switch checked={ssl} onCheckedChange={setSsl} />
-          </div>
+          )}
         </div>
 
         <DialogFooter>
           <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
           <Button
-            disabled={!hostname || !projectId || submitting}
+            disabled={!canSubmit || submitting}
             onClick={() => void run(async () => {
-              await addDomain(projectId, hostname, type, ssl)
-              toast({ title: 'Domain added', description: `${hostname} recorded for the project. Routing/SSL require a configured reverse proxy.` })
+              const useTls = mode === 'ip' ? ipTls === 'selfsigned' : ssl
+              await addDomain(projectId, effectiveHost, type, useTls)
+              toast({
+                title: 'Domain added',
+                description:
+                  mode === 'ip'
+                    ? ipTls === 'selfsigned'
+                      ? `${effectiveHost} routed with a self-signed cert.`
+                      : `${effectiveHost} routed over plain HTTP.`
+                    : ssl
+                      ? `${effectiveHost} routed; Let's Encrypt will issue the cert once DNS resolves.`
+                      : `${effectiveHost} routed over plain HTTP.`,
+              })
               setOpen(false)
             })}
             className="gap-2"
