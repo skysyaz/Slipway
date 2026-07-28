@@ -16,6 +16,9 @@
  */
 import { promises as fs } from "node:fs"
 import path from "node:path"
+import { validIp, isPrivateIp } from "./security"
+
+export { isPrivateIp, validIp }
 
 export interface DomainRouteInput {
   projectSlug: string
@@ -35,7 +38,9 @@ function dynamicDir(): string {
 }
 
 function isIp(host: string): boolean {
-  return /^(\d{1,3}\.){3}\d{1,3}$/.test(host) || host.includes(":")
+  // R5: octet-range-checked via net.isIP — the old ^(\d{1,3}\.){3}\d{1,3}$
+  // matched 999.999.999.999, which would then be routed/trusted as an "IP".
+  return validIp(host)
 }
 
 /**
@@ -100,20 +105,6 @@ export function publicIp(): string | null {
   const host = raw.replace(/^https?:\/\//, "").split("/")[0].split(":")[0]
   if (isPrivateIp(host)) return null
   return isIp(host) ? host : null
-}
-
-export function isPrivateIp(host: string): boolean {
-  const m = host.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/)
-  if (!m) return false
-  const a = Number(m[1])
-  const b = Number(m[2])
-  return (
-    a === 10 ||
-    a === 127 ||
-    (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168) ||
-    (a === 169 && b === 254)
-  )
 }
 
 /** Build an sslip.io hostname from a public IP. */

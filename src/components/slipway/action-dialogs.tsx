@@ -469,7 +469,6 @@ export function NewDomainDialog() {
   const [ssl, setSsl] = React.useState(true)
   const [ipTls, setIpTls] = React.useState<'selfsigned' | 'http'>('selfsigned')
   const [publicIp, setPublicIp] = React.useState<string | null>(null)
-  const [hostError, setHostError] = React.useState('')
 
   React.useEffect(() => {
     if (!open) return
@@ -477,7 +476,7 @@ export function NewDomainDialog() {
   }, [open])
 
   React.useEffect(() => {
-    if (!open) { setHostname(''); setType('primary'); setSsl(true); setMode('custom'); setIpTls('selfsigned'); setHostError('') }
+    if (!open) { setHostname(''); setType('primary'); setSsl(true); setMode('custom'); setIpTls('selfsigned') }
     else if (selectedProjectId) setProjectId(selectedProjectId)
   }, [open, selectedProjectId])
 
@@ -570,7 +569,7 @@ export function NewDomainDialog() {
             >
               <Input
                 value={hostname}
-                onChange={(e) => { setHostname(e.target.value); setHostError('') }}
+                onChange={(e) => setHostname(e.target.value)}
                 placeholder="app.example.com"
                 className="font-mono text-[13px]"
               />
