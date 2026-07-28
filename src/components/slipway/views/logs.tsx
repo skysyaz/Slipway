@@ -71,35 +71,44 @@ export function LogsView() {
     system: 'text-muted-foreground',
   }
 
-  // ponytail: collapse a crash-loop into ONE row. Consecutive lines with the
-  // same service+level+message become a group with a ×N badge + the time span
-  // (first→last); click to expand and see the individual lines. This turns a
-  // 3-second Postgres PANIC spam into a single alarming "repeated 18×" item.
+  // ponytail: collapse a crash-loop into ONE row. The real Postgres ENOSPC
+  // crash-loop is INTERLEAVED — each cycle repeats the same ~7 lines but with a
+  // new [PID] + timestamp, so byte-identical / pure-consecutive grouping never
+  // collapses it. We normalize the message (dates/times/[PID]/`PID n` → tokens)
+  // and bucket the WHOLE filtered list by service+level+normalizedKey, so all
+  // 30 PANIC lines fold into one ×30 critical row. Map preserves first-seen
+  // order; the row shows the first line's original text + ×N + first→last span;
+  // expand to see every original line.
+  const normKey = (s: string): string =>
+    s
+      .replace(/\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d+)?\s*(UTC|Z)?/g, '<ts>')
+      .replace(/\b\d{2}:\d{2}:\d{2}(\.\d+)?\b/g, '<ts>')
+      .replace(/\[\d+\]/g, '[#]')
+      .replace(/PID \d+/gi, 'PID #')
   const [expanded, setExpanded] = React.useState<Set<string>>(new Set())
   const grouped = React.useMemo(() => {
-    const out: Array<{
-      key: string
-      level: string
-      service: string
-      message: string
-      count: number
-      firstTs: string
-      lastTs: string
-      lines: typeof filtered
-    }> = []
+    const map = new Map<
+      string,
+      {
+        key: string
+        level: string
+        service: string
+        message: string
+        count: number
+        firstTs: string
+        lastTs: string
+        lines: typeof filtered
+      }
+    >()
     for (const l of filtered) {
-      const last = out[out.length - 1]
-      if (
-        last &&
-        last.service === l.service &&
-        last.level === l.level &&
-        last.message === l.message
-      ) {
-        last.count++
-        last.lastTs = l.ts
-        last.lines.push(l)
+      const k = l.service + '|' + l.level + '|' + normKey(l.message)
+      const g = map.get(k)
+      if (g) {
+        g.count++
+        g.lastTs = l.ts
+        g.lines.push(l)
       } else {
-        out.push({
+        map.set(k, {
           key: l.id,
           level: l.level,
           service: l.service,
@@ -111,7 +120,7 @@ export function LogsView() {
         })
       }
     }
-    return out
+    return [...map.values()]
   }, [filtered])
 
   const toggleGroup = (key: string) =>

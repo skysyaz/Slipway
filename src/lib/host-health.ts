@@ -156,10 +156,15 @@ async function scanEnospc(docker: Docker): Promise<EnospcHit[]> {
 // ── Traefik log parsing (Bug 4) ──────────────────────────────────────────────
 // Turn Traefik's log soup into structured, actionable issues. Regexes written
 // against the real error classes from the outage.
-const RE_CONFIG_FIELD = /field not found,?\s*node:\s*(\S+)/i
+const RE_CONFIG_FIELD = /field not found,?\s*node:\s*([^"\s,}]+)/i
 const RE_MISSING_MW = /middleware "([^"]+)" does not exist/i
-// "Unable to obtain ACME certificate for domains ... : ... 403 unauthorized"
-const RE_ACME = /unable to obtain .*?certificate.*?(?:for\s+(?:domains?\s+)?["'\[]?([^\s"'\]]+)["'\]]?)/i
+// Two ACME failure shapes in the wild:
+//   "Unable to obtain ACME certificate for domains ... domains=["x"] ... rule=Host(`x`)"
+//   "Cannot retrieve the ACME challenge for router2.skysyaz.my (token ...)"
+const RE_ACME_DOM_ARRAY = /domains=\[\s*"([^"]+)"/i
+const RE_ACME_HOST_RULE = /Host\(`([^`]+)`\)/i
+const RE_ACME_BODY = /for\s+(?:domains?\s+)?\[\s*"?([^\]" \s]+)"?/i
+const RE_ACME_CHALLENGE = /cannot retrieve the acme challenge for\s+(\S+)/i
 const RE_HTTP_STATUS = /\b(40[0-9])\b/
 const RE_CLOUDFLARE = /2606:4700/i
 // watcher: `open /etc/dokploy/traefik/dynamic/app-<slug>-<id>.yml: no such file`
@@ -174,16 +179,35 @@ function parseTraefikLogs(text: string): TraefikIssue[] {
     seen.add(key)
     out.push(iss)
   }
+  // ponytail: pull the domain out of whichever place Traefik put it. The real
+  // "Unable to obtain" line wraps the domain in `domains=["x"]` and again in
+  // `rule=Host(`x`)`; the bare "for domains" capture used to grab the literal
+  // word `error` (the next token) — wrong. Try the array first, then the Host
+  // rule, then the `[x]` body, then the challenge line's `for <domain>`.
+  const acmeDomain = (line: string): string | undefined => {
+    let m = line.match(RE_ACME_DOM_ARRAY)
+    if (m) return m[1]
+    m = line.match(RE_ACME_HOST_RULE)
+    if (m) return m[1]
+    m = line.match(RE_ACME_BODY)
+    if (m) return m[1]
+    m = line.match(RE_ACME_CHALLENGE)
+    if (m) return m[1]
+    return undefined
+  }
   for (const raw of text.split("\n")) {
     const line = sanitize(raw)
     if (!line) continue
 
     let m = line.match(RE_CONFIG_FIELD)
     if (m) {
+      // ponytail: JSON-wrapped lines leave a trailing `"` on the capture
+      // (`..."node":"excludedRequestPaths"`) — trim trailing non-key chars.
+      const node = m[1].replace(/[^A-Za-z0-9_.-]+$/g, "")
       push({
         severity: "error",
         kind: "config",
-        message: `Unknown config key "${m[1]}" — Traefik version mismatch.`,
+        message: `Unknown config key "${node}" — Traefik version mismatch.`,
         hint: "Remove or correct it in the static config (the running Traefik doesn't recognise this field).",
       })
       continue
@@ -198,9 +222,8 @@ function parseTraefikLogs(text: string): TraefikIssue[] {
       })
       continue
     }
-    if (/unable to obtain.*?certificate/i.test(line)) {
-      const dm = line.match(RE_ACME)
-      const domain = dm ? dm[1] : undefined
+    if (/unable to obtain.*?certificate|cannot retrieve the acme challenge/i.test(line)) {
+      const domain = acmeDomain(line)
       const sm = line.match(RE_HTTP_STATUS)
       const cloudflare = RE_CLOUDFLARE.test(line)
       push({
@@ -380,6 +403,11 @@ export interface DeployCause {
 }
 export function diagnoseDeployError(text: string): DeployCause | null {
   const t = text || ""
+  if (/spawn docker ENOENT|docker: not found|command not found.*docker/i.test(t))
+    return {
+      cause: "The build runner has no `docker` CLI — git/folder builds can't run inside Slipway.",
+      action: "Use an image source (pull a prebuilt image), or run the build on a host with the docker CLI in PATH.",
+    }
   if (/No space left on device|ENOSPC/i.test(t))
     return {
       cause: "Host disk is full — clone/build could not write.",
