@@ -30,8 +30,9 @@ is unreachable or an operation fails:
 
 `src/lib/ops.ts` is the operations façade and maps every op straight to the real
 implementation in `src/lib/docker-ops.ts`. The only thing left in
-`src/lib/simulate.ts` is the shared `DeployOptions` type and the
-*metadata-level* rollback record writer.
+`src/lib/simulate.ts` is the shared `DeployOptions` type — `simulateRollback`
+(which wrote a "healthy" rollback record without touching Docker) and
+`src/lib/logs.ts` (a synthetic log-line generator) have both been removed.
 
 **When adding features, preserve this.** Do not add optimistic UI that claims
 success before the container exists, and do not add mock/demo data paths.
@@ -63,14 +64,23 @@ Docker Desktop / `dockerd` must be running for anything meaningful to work.
 ### Testing reality
 
 There is **no test framework**. `bun run test` runs a single hand-rolled
-self-check (`scripts/selfcheck-host-health.ts`) using `node:assert`, covering the
-parsers that are easy to get subtly wrong: `diagnoseDeployError`,
-`parseTraefikLogs`, `demuxStream` (dockerode's multiplexed stream framing), and
-`sanitize`. Its fixtures are real log lines from a production outage — **do not
-loosen those assertions to make a change pass.**
+self-check (`scripts/selfcheck-host-health.ts`, 27 checks) using `node:assert`:
 
-If you add parsing/classification logic in `src/lib/host-health.ts`, add a case
-to that self-check. `scripts/audit.sh` and `scripts/audit-views.sh` are manual
+- **`src/lib/host-health.ts`** — `diagnoseDeployError`, `parseTraefikLogs`,
+  `demuxStream` (dockerode's multiplexed stream framing), `sanitize`. Its
+  fixtures are real log lines from a production outage — **do not loosen those
+  assertions to make a change pass.**
+- **`src/lib/authz.ts`** — the role/action matrix and the method→action default.
+  This is the security policy the route wrapper applies; keep it covered.
+- **`src/lib/backup-format.ts`** — backup slugs, `shq()` shell quoting (a
+  database password is interpolated into `sh -c`, so a quoting bug is command
+  injection), `parseSizeMarker`, and the per-engine dump commands.
+
+Those three modules are deliberately **pure and import-free** so the self-check
+runs without a Docker socket, a database, or a generated Prisma client. Keep new
+testable logic out of the modules that import `./db`.
+
+If you add parsing/classification logic to any of them, add a case. `scripts/audit.sh` and `scripts/audit-views.sh` are manual
 browser-driving smoke scripts (they need an `agent-browser` binary) and are not
 part of CI.
 
@@ -90,15 +100,17 @@ src/
       new-deployment-dialog.tsx, rollback-dialog.tsx, sidebar.tsx, topbar.tsx, …
     ui/                   shadcn/ui primitives (new-york style) — 48 files, don't hand-edit
   lib/
-    docker-ops.ts         REAL Docker orchestration (~1700 lines; the heart of the app)
+    docker-ops.ts         REAL Docker orchestration (~1900 lines; the heart of the app)
     docker.ts             dockerode client + cached availability ping
     ops.ts                thin façade re-exporting the real ops
+    authz.ts              PURE role/action policy (roleAllows, defaultActionFor)
+    backup-format.ts      PURE backup naming, shell quoting, per-engine dump commands
     host-health.ts        disk/inode/ENOSPC/Traefik diagnosis + log demux + sanitize
     metrics.ts            in-memory ring buffer sampled from `docker stats`
     db.ts                 Prisma singleton + SQLite path resolution
     auth.ts               NextAuth v4 options (credentials + TOTP + optional OAuth)
     server-auth.ts        getAuth/requireAuth/can — session cookie OR Bearer token
-    http.ts               route() wrapper: auth + params + error handling
+    http.ts               route() wrapper: auth + scope check + params + error handling
     api.ts                client-side typed fetch helpers (api.get/post/patch/put/del)
     serialize.ts          Prisma rows → frontend shapes
     notify.ts             emit(): activity + notification + external dispatch
@@ -150,10 +162,25 @@ export const GET = route(async (req, params, auth) => {
 `export const dynamic = "force-dynamic"`.
 
 Auth accepts **either** a NextAuth session cookie **or**
-`Authorization: Bearer slipway_…`. Tokens are bcrypt-hashed, so
-`getAuth` compares against every token row — fine at this scale, but note it if
-token counts ever grow. Roles are coarse: `admin` > `deploy` > `read`, checked
-via `can(ctx, action)`.
+`Authorization: Bearer slipway_…`. Tokens are bcrypt-hashed, so `getAuth` has to
+compare against every token row; a short-TTL verified-token cache keeps the hot
+path off that scan (invalidated on revoke). An *invalid* token still costs a
+full scan — that ceiling needs an indexed lookup column.
+
+**Scopes are enforced, and that enforcement is the route wrapper's job.**
+`route()` derives the required privilege from the HTTP method — GET/HEAD →
+`read`, everything else → `deploy` — and rejects over-scoped **token** requests
+with 403. Operator surfaces pass it explicitly:
+
+```ts
+export const POST = route(async (req, params, auth) => { … }, { action: "admin" })
+```
+
+Admin-only today: tokens, settings PATCH, servers (+join), SSH keys, registries,
+webhooks, integrations, 2FA. Interactive **sessions are not gated** — Slipway has
+no role-management UI, so a signed-in user blocked from deploying would have no
+way to be granted the role. Keep that asymmetry unless you also build user
+management. The policy itself lives in `src/lib/authz.ts` (pure, tested).
 
 `GET /api/` is a health endpoint reporting Docker availability.
 
@@ -165,6 +192,36 @@ the background** and returns the deployment id immediately. The client polls for
 progression. Failures persist the last ~1200 chars of the step log so the UI can
 show a real cause. Build for git/folder/compose sources shells out to the
 `docker` CLI via `runCli()`; image sources go through dockerode.
+
+Two invariants to preserve:
+
+- **Container config comes from `containerConfigFor(projectId)`** — env vars
+  scoped to the project's environment, `startCmd`, and the memory/CPU limits.
+  Deploy and `realReconcile` both go through it. They used to disagree (deploy
+  passed `Env: []`), so a project's live config depended on which action ran last.
+- **Builds are tagged `slipway-<slug>:<deployment-id-suffix>` as well as
+  `:latest`**, and the released image is stored on `Deployment.image`. That is
+  what makes rollback possible; `:latest` alone is overwritten by the next build.
+
+### Rollback
+
+`realRollback()` recreates the project's container from a previous deployment's
+recorded `image`, preserving volumes, networks, port bindings and labels. The
+current container is **renamed aside, not removed**, and restored if the
+rolled-back one fails to start — the dialog promises an automatic abort, so the
+known-good container has to still exist. Fails honestly when the deployment
+recorded no image, or the image has been pruned off the host.
+
+### Backups
+
+Archives go into the **`slipway-backups` named Docker volume**: `tar -czf` for
+volumes, and the engine's own dump tool for databases (`pg_dump`, `mysqldump`,
+`mongodump`, `redis-cli --rdb`) run from a helper container built on the
+database's own image, sharing the DB container's network namespace so
+`127.0.0.1` is the engine. Sizes are `stat`-ed, durations measured, retention
+pruned. MSSQL and SQLite are refused honestly. **Restore is not automated** and
+downloads are not served — the UI tells the operator the filename and the
+`docker run … cp` command instead of pretending.
 
 ### Notifications
 
@@ -296,8 +353,10 @@ reflects that — keep the gating honest.
 
 ## Known ceilings (state these; don't paper over them)
 
-- **Single node.** No Swarm/Kubernetes; `realReconcile` explicitly refuses Swarm
-  tasks.
+- **Single node.** No Swarm/Kubernetes; `realReconcile` and `realRollback`
+  explicitly refuse Swarm tasks, and `realScale` accepts only 0 (stop) or 1
+  (run) — more than one replica needs a scheduler, so it is refused rather than
+  recorded as if it happened.
 - **Single instance.** The `node-cron` scheduler and the metrics ring buffer are
   in-process. Horizontal scaling would duplicate backup firings and split
   metrics; that needs an external worker.
@@ -309,6 +368,16 @@ reflects that — keep the gating honest.
   live in the reverse proxy) and does not know imported DB passwords — such rows
   are marked `external`.
 - **OIDC / SAML** are shown as disabled.
+- **Backups** cover volumes and Slipway-provisioned databases
+  (postgres/mysql/mariadb/mongodb/redis/valkey). MSSQL and SQLite are refused;
+  imported `external` databases can't be dumped because Slipway doesn't know
+  their credentials. **Restore is manual** and archives aren't served over
+  HTTP — the UI reports the filename and the `docker run … cp` command.
+- **Rollback needs a recorded image.** Deployments taken before
+  `Deployment.image` existed, and compose deploys (compose owns its images),
+  can't be rolled back automatically.
+- **API token scopes are enforced; session roles are not.** See the Server
+  section — there is no user-management UI to grant a role back.
 
 ## Git workflow
 
