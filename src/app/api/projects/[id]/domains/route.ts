@@ -3,13 +3,15 @@ import { db } from "@/lib/db"
 import { serializeProject } from "@/lib/serialize"
 import { emit } from "@/lib/notify"
 import { writeDomainRoute, isPrivateIp } from "@/lib/routing"
+import { validIp } from "@/lib/security"
 
 export const dynamic = "force-dynamic"
 
 const INCLUDE = { services: true, domains: true, envVars: true } as const
 
 function isIpAddress(h: string): boolean {
-  return /^(\d{1,3}\.){3}\d{1,3}$/.test(h) || h.includes(":")
+  // R5: octet-range-checked — never trust ^(\d{1,3}\.){3}\d{1,3}$.
+  return validIp(h)
 }
 
 export const POST = route(async (req, params, auth) => {

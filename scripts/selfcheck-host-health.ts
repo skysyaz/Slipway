@@ -48,6 +48,7 @@ import {
   execFormArgv,
   shellQuote,
 } from "../src/lib/security"
+import { deriveCertStatus, reachabilityFromProbe } from "../src/lib/status"
 
 let n = 0
 const ok = (name: string) => console.log(`  ✓ ${name}`)
@@ -493,6 +494,39 @@ check("hasShellMetachars + execFormArgv + shellQuote", () => {
   assert.equal(hasShellMetachars("node server.js"), false)
   assert.deepEqual(execFormArgv('nginx -g "daemon off;"'), ["nginx", "-g", "daemon off;"])
   assert.equal(shellQuote("it's"), "'it'\\''s'")
+})
+
+// ── status.ts derived model (META-RULE 2) ───────────────────────────────────
+check("deriveCertStatus: IP mode is never 'Cert pending' and never ACME", () => {
+  const https = deriveCertStatus({ hostname: "104.214.169.39", ssl: "managed", status: "pending", https: true, isIp: true })
+  assert.equal(https.state, "self-signed")
+  assert.equal(https.tone, "warn")
+  const http = deriveCertStatus({ hostname: "104.214.169.39", ssl: "disabled", status: "active", https: false, isIp: true })
+  assert.equal(http.state, "http")
+})
+
+check("deriveCertStatus: pending -> stuck after timeout; active is HTTPS; http for plain", () => {
+  const fresh = deriveCertStatus({ hostname: "app.example.com", ssl: "managed", status: "pending", https: true, createdAt: Date.now() - 60_000 })
+  assert.equal(fresh.state, "pending")
+  const old = deriveCertStatus({ hostname: "app.example.com", ssl: "managed", status: "pending", https: true, createdAt: Date.now() - 20 * 60 * 1000 })
+  assert.equal(old.state, "stuck")
+  assert.equal(old.tone, "warn")
+  const active = deriveCertStatus({ hostname: "app.example.com", ssl: "managed", status: "active", https: true })
+  assert.equal(active.state, "active")
+  const plain = deriveCertStatus({ hostname: "app.example.com", ssl: "disabled", status: "active", https: false })
+  assert.equal(plain.state, "http")
+})
+
+check("reachabilityFromProbe: reachable / 404 / tls / conn-fail mapped with hints", () => {
+  assert.equal(reachabilityFromProbe({ ok: true, code: 200, latencyMs: 12 }).state, "reachable")
+  const nf = reachabilityFromProbe({ ok: false, code: 404 })
+  assert.equal(nf.state, "http-error")
+  assert.match(nf.hint || "", /no route at '\//)
+  const tls = reachabilityFromProbe({ ok: false, error: "self signed certificate" })
+  assert.equal(tls.state, "tls-error")
+  const down = reachabilityFromProbe({ ok: false, error: "fetch failed: ECONNREFUSED" })
+  assert.equal(down.state, "connection-failed")
+  assert.match(down.hint || "", /crash-looping|port/i)
 })
 
 console.log(`\n  ${n} checks passed ✓`)
