@@ -114,7 +114,12 @@ interface SlipwayState {
   updateDatabase: (id: string, patch: Record<string, unknown>) => Promise<void>
   deleteDatabase: (id: string, removeData: boolean) => Promise<void>
   addVolume: (input: Partial<Volume>) => Promise<void>
+  updateVolume: (id: string, patch: Record<string, unknown>) => Promise<void>
+  deleteVolume: (id: string, removeData: boolean) => Promise<void>
   addDomain: (projectId: string, hostname: string, type: Domain['type'], ssl: boolean) => Promise<void>
+  deleteDomain: (projectId: string, domainId: string) => Promise<void>
+  restartDatabase: (id: string) => Promise<void>
+  reconcileProject: (projectId: string) => Promise<void>
   runBackup: (target: string, targetKind: BackupRecord['targetKind']) => Promise<void>
   addBackupSchedule: (target: string, schedule: string, retentionDays: number) => Promise<void>
   scanHost: () => Promise<{ projects: number; databases: number; volumes: number; skipped: number }>
@@ -132,6 +137,18 @@ async function safeGet<T>(url: string, fallback: T): Promise<T> {
     return await api.get<T>(url)
   } catch {
     return fallback
+  }
+}
+
+// ponytail: on a transient API failure (container mid-restart, network blip),
+// KEEP the existing data instead of blanking the dashboard to []. This is the
+// fix for "scanned items go missing on refresh then come back" — a failed poll
+// no longer overwrites good data with empty.
+async function fetchOrKeep<T>(url: string, keep: T): Promise<T> {
+  try {
+    return await api.get<T>(url)
+  } catch {
+    return keep
   }
 }
 
@@ -199,33 +216,35 @@ export const useSlipway = create<SlipwayState>((set, get) => ({
   },
 
   refetchAll: async () => {
+    const s = get()
     const [projects, deployments, databases, volumes, servers, backups, backupSchedules, notifications, activity, metrics] =
       await Promise.all([
-        safeGet<Project[]>('/api/projects', []),
-        safeGet<Deployment[]>('/api/deployments', []),
-        safeGet<DatabaseInstance[]>('/api/databases', []),
-        safeGet<Volume[]>('/api/volumes', []),
-        safeGet<Server[]>('/api/servers', []),
-        safeGet<BackupRecord[]>('/api/backups', []),
-        safeGet<BackupSchedule[]>('/api/backups/schedules', []),
-        safeGet<Notification[]>('/api/notifications', []),
-        safeGet<ActivityEvent[]>('/api/activity', []),
-        safeGet<Metrics>('/api/metrics', EMPTY_METRICS),
+        fetchOrKeep<Project[]>('/api/projects', s.projects),
+        fetchOrKeep<Deployment[]>('/api/deployments', s.deployments),
+        fetchOrKeep<DatabaseInstance[]>('/api/databases', s.databases),
+        fetchOrKeep<Volume[]>('/api/volumes', s.volumes),
+        fetchOrKeep<Server[]>('/api/servers', s.servers),
+        fetchOrKeep<BackupRecord[]>('/api/backups', s.backups),
+        fetchOrKeep<BackupSchedule[]>('/api/backups/schedules', s.backupSchedules),
+        fetchOrKeep<Notification[]>('/api/notifications', s.notifications),
+        fetchOrKeep<ActivityEvent[]>('/api/activity', s.activity),
+        fetchOrKeep<Metrics>('/api/metrics', s.metrics),
       ])
     set({ projects, deployments, databases, volumes, servers, backups, backupSchedules, notifications, activity, metrics })
   },
 
   refetch: async (keys) => {
+    const s = get()
     const tasks: Promise<void>[] = []
-    if (keys.includes('projects')) tasks.push(safeGet<Project[]>('/api/projects', []).then((v) => set({ projects: v })))
-    if (keys.includes('deployments')) tasks.push(safeGet<Deployment[]>('/api/deployments', []).then((v) => set({ deployments: v })))
-    if (keys.includes('databases')) tasks.push(safeGet<DatabaseInstance[]>('/api/databases', []).then((v) => set({ databases: v })))
-    if (keys.includes('volumes')) tasks.push(safeGet<Volume[]>('/api/volumes', []).then((v) => set({ volumes: v })))
-    if (keys.includes('servers')) tasks.push(safeGet<Server[]>('/api/servers', []).then((v) => set({ servers: v })))
-    if (keys.includes('backups')) tasks.push(safeGet<BackupRecord[]>('/api/backups', []).then((v) => set({ backups: v })))
-    if (keys.includes('schedules')) tasks.push(safeGet<BackupSchedule[]>('/api/backups/schedules', []).then((v) => set({ backupSchedules: v })))
-    if (keys.includes('notifications')) tasks.push(safeGet<Notification[]>('/api/notifications', []).then((v) => set({ notifications: v })))
-    if (keys.includes('activity')) tasks.push(safeGet<ActivityEvent[]>('/api/activity', []).then((v) => set({ activity: v })))
+    if (keys.includes('projects')) tasks.push(fetchOrKeep<Project[]>('/api/projects', s.projects).then((v) => set({ projects: v })))
+    if (keys.includes('deployments')) tasks.push(fetchOrKeep<Deployment[]>('/api/deployments', s.deployments).then((v) => set({ deployments: v })))
+    if (keys.includes('databases')) tasks.push(fetchOrKeep<DatabaseInstance[]>('/api/databases', s.databases).then((v) => set({ databases: v })))
+    if (keys.includes('volumes')) tasks.push(fetchOrKeep<Volume[]>('/api/volumes', s.volumes).then((v) => set({ volumes: v })))
+    if (keys.includes('servers')) tasks.push(fetchOrKeep<Server[]>('/api/servers', s.servers).then((v) => set({ servers: v })))
+    if (keys.includes('backups')) tasks.push(fetchOrKeep<BackupRecord[]>('/api/backups', s.backups).then((v) => set({ backups: v })))
+    if (keys.includes('schedules')) tasks.push(fetchOrKeep<BackupSchedule[]>('/api/backups/schedules', s.backupSchedules).then((v) => set({ backupSchedules: v })))
+    if (keys.includes('notifications')) tasks.push(fetchOrKeep<Notification[]>('/api/notifications', s.notifications).then((v) => set({ notifications: v })))
+    if (keys.includes('activity')) tasks.push(fetchOrKeep<ActivityEvent[]>('/api/activity', s.activity).then((v) => set({ activity: v })))
     await Promise.all(tasks)
   },
 
@@ -295,8 +314,33 @@ export const useSlipway = create<SlipwayState>((set, get) => ({
     await get().refetch(['volumes', 'activity', 'notifications'])
   },
 
+  updateVolume: async (id, patch) => {
+    await api.patch(`/api/volumes/${id}`, patch)
+    await get().refetch(['volumes', 'activity', 'notifications'])
+  },
+
+  deleteVolume: async (id, removeData) => {
+    await api.del(`/api/volumes/${id}?removeData=${removeData ? 'true' : 'false'}`)
+    await get().refetch(['volumes', 'activity', 'notifications'])
+  },
+
   addDomain: async (projectId, hostname, type, ssl) => {
     await api.post(`/api/projects/${projectId}/domains`, { hostname, type, ssl })
+    await get().refetch(['projects', 'activity', 'notifications'])
+  },
+
+  deleteDomain: async (projectId, domainId) => {
+    await api.del(`/api/projects/${projectId}/domains/${domainId}`)
+    await get().refetch(['projects', 'activity', 'notifications'])
+  },
+
+  restartDatabase: async (id) => {
+    await api.post(`/api/databases/${id}/restart`)
+    await get().refetch(['databases', 'activity', 'notifications'])
+  },
+
+  reconcileProject: async (projectId) => {
+    await api.post(`/api/projects/${projectId}/reconcile`)
     await get().refetch(['projects', 'activity', 'notifications'])
   },
 

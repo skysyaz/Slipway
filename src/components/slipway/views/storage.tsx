@@ -1,15 +1,24 @@
 'use client'
 
 import * as React from 'react'
-import { HardDrive, Plus, Search, Server, Lock, MoreHorizontal, Download, RotateCcw, Archive } from 'lucide-react'
+import { HardDrive, Plus, Search, Server, Lock, MoreHorizontal, Download, Archive, Trash2, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+} from '@/components/ui/dropdown-menu'
 import { useSlipway } from '@/lib/slipway/store'
 import { BytesShort } from '../format'
 import { useToast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
+import type { Volume, Project } from '@/lib/slipway/types'
 
 export function StorageView() {
   const volumes = useSlipway((s) => s.volumes)
@@ -96,21 +105,73 @@ export function StorageView() {
                 <Badge variant="outline" className="text-[9px] uppercase">{v.type}</Badge>
               </div>
               <div className="col-span-1 flex items-center justify-end gap-0.5">
-                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Download snapshot" onClick={() => toast({ title: 'Snapshot queued', description: `${v.name} snapshot is being prepared.` })}>
-                  <Download size={12} />
-                </Button>
                 <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="Backup" onClick={() => toast({ title: 'Backup started', description: `${v.name} backup is running.` })}>
                   <Archive size={12} />
                 </Button>
-                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="More" onClick={() => toast({ title: 'Volume actions', description: `Edit/resize/delete ${v.name}.` })}>
-                  <MoreHorizontal size={12} />
-                </Button>
+                <VolumeActions vol={v} projects={projects} />
               </div>
             </div>
           )
         })}
       </div>
     </div>
+  )
+}
+
+// Real per-volume actions: link/unlink to a project, delete (with the option
+// to also remove the real Docker volume). Replaces the stub "⋯" toast.
+function VolumeActions({ vol, projects }: { vol: Volume; projects: Project[] }) {
+  const { toast } = useToast()
+  const updateVolume = useSlipway((s) => s.updateVolume)
+  const deleteVolume = useSlipway((s) => s.deleteVolume)
+  const [busy, setBusy] = React.useState(false)
+
+  const link = async (projectId: string | null) => {
+    try {
+      await updateVolume(vol.id, { projectId })
+      toast({ title: projectId ? 'Volume linked' : 'Volume unlinked' })
+    } catch (e) {
+      toast({ title: 'Failed', description: (e as Error).message, variant: 'destructive' })
+    }
+  }
+
+  const del = async () => {
+    // OK = delete the Docker volume + row; Cancel = forget in Slipway only.
+    const removeData = window.confirm(
+      `Delete volume "${vol.name}"?\n\nOK — delete the real Docker volume AND its data (irreversible).\nCancel — forget it in Slipway only, keep the Docker volume.`
+    )
+    setBusy(true)
+    try {
+      await deleteVolume(vol.id, removeData)
+      toast({ title: 'Volume removed', description: removeData ? `${vol.name} and its data deleted.` : `${vol.name} forgotten (Docker volume kept).` })
+    } catch (e) {
+      toast({ title: 'Delete failed', description: (e as Error).message, variant: 'destructive' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="ghost" size="sm" className="h-7 w-7 p-0" disabled={busy}>
+          {busy ? <Loader2 size={12} className="animate-spin" /> : <MoreHorizontal size={12} />}
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-48">
+        <DropdownMenuLabel className="text-[10px] uppercase tracking-wider">Link to project</DropdownMenuLabel>
+        <DropdownMenuItem onClick={() => void link(null)}>
+          {vol.projectId ? 'Unlink (shared)' : '— (shared)'}
+        </DropdownMenuItem>
+        {projects.map((p) => (
+          <DropdownMenuItem key={p.id} onClick={() => void link(p.id)}>{p.name}</DropdownMenuItem>
+        ))}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem className="text-rose-500 focus:text-rose-500" onClick={() => void del()}>
+          <Trash2 size={12} className="mr-2" /> Delete…
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   )
 }
 

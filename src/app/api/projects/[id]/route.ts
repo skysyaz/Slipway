@@ -1,7 +1,7 @@
 import { route } from "@/lib/http"
 import { db } from "@/lib/db"
 import { serializeProject } from "@/lib/serialize"
-import { stopProject, removeProject } from "@/lib/ops"
+import { stopProject, removeProject, updateContainer } from "@/lib/ops"
 import { recordActivity } from "@/lib/notify"
 
 export const dynamic = "force-dynamic"
@@ -58,6 +58,15 @@ export const PATCH = route(async (req, params, auth) => {
     data,
     include: INCLUDE,
   })
+  // ponytail: apply resource-limit changes live via `docker update` when a real
+  // container exists (non-destructive). Env/image/cmd changes need a recreate —
+  // that's the explicit "Apply to container" action (POST /reconcile).
+  if (data.memoryMb !== undefined || data.cpuMilli !== undefined) {
+    await updateContainer(params.id, {
+      ...(data.memoryMb !== undefined ? { memoryMb: Number(data.memoryMb) } : {}),
+      ...(data.cpuMilli !== undefined ? { cpuMilli: Number(data.cpuMilli) } : {}),
+    }, auth.username).catch((e) => console.error("[api] live update failed:", (e as Error).message))
+  }
   await recordActivity("env", `updated settings on ${existing.name}`, {
     projectId: params.id,
     actor: auth.username,

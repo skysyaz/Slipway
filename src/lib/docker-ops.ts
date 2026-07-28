@@ -305,6 +305,26 @@ async function runCli(args: string[]): Promise<void> {
   })
 }
 
+// Every real container id tied to a project: the project's own container
+// (scanned/imported containers set project.dockerContainerId) plus any service
+// containers. Deduped. Scanned projects have NO Service rows, so without this
+// the lifecycle ops below would silently no-op on the real container — which
+// was the bug behind "can't do anything with scanned containers".
+async function projectContainerIds(projectId: string): Promise<string[]> {
+  const project = await db.project.findUnique({
+    where: { id: projectId },
+    select: { dockerContainerId: true },
+  })
+  const services = await db.service.findMany({
+    where: { projectId },
+    select: { dockerContainerId: true },
+  })
+  const ids = new Set<string>()
+  if (project?.dockerContainerId) ids.add(project.dockerContainerId)
+  for (const s of services) if (s.dockerContainerId) ids.add(s.dockerContainerId)
+  return [...ids]
+}
+
 export async function realRestart(
   projectId: string,
   serviceId?: string,
@@ -313,23 +333,28 @@ export async function realRestart(
   const docker = await getDocker()
   const project = await db.project.findUnique({ where: { id: projectId } })
   if (!project) throw new Error("Project not found")
-  const services = await db.service.findMany({
-    where: { projectId, ...(serviceId ? { id: serviceId } : {}) },
-  })
-  for (const s of services) {
-    if (s.dockerContainerId) {
-      try {
-        await docker.getContainer(s.dockerContainerId).restart()
-      } catch {
-        /* container may be gone */
-      }
+  // serviceId = restart just that service's container; otherwise restart every
+  // real container tied to the project (project + services).
+  let ids: string[]
+  if (serviceId) {
+    const s = await db.service.findUnique({ where: { id: serviceId }, select: { dockerContainerId: true } })
+    ids = s?.dockerContainerId ? [s.dockerContainerId] : []
+  } else {
+    ids = await projectContainerIds(projectId)
+  }
+  for (const id of ids) {
+    try {
+      await docker.getContainer(id).restart()
+    } catch {
+      /* container may be gone */
     }
   }
   await db.service.updateMany({
     where: { projectId, ...(serviceId ? { id: serviceId } : {}) },
     data: { status: "running", restarts: { increment: 1 } },
   })
-  await recordActivity("scale", `restarted ${serviceId ? "service" : "all services"} on ${project.name}`, {
+  if (!serviceId) await db.project.update({ where: { id: projectId }, data: { status: "running" } })
+  await recordActivity("scale", `restarted ${serviceId ? "service" : project.name}`, {
     projectId,
     actor,
   })
@@ -337,14 +362,12 @@ export async function realRestart(
 
 export async function realStop(projectId: string, actor = "you"): Promise<void> {
   const docker = await getDocker()
-  const services = await db.service.findMany({ where: { projectId } })
-  for (const s of services) {
-    if (s.dockerContainerId) {
-      try {
-        await docker.getContainer(s.dockerContainerId).stop()
-      } catch {
-        /* ignore */
-      }
+  const ids = await projectContainerIds(projectId)
+  for (const id of ids) {
+    try {
+      await docker.getContainer(id).stop()
+    } catch {
+      /* ignore */
     }
   }
   await db.project.update({ where: { id: projectId }, data: { status: "stopped" } })
@@ -354,17 +377,142 @@ export async function realStop(projectId: string, actor = "you"): Promise<void> 
 
 export async function realRemove(projectId: string, actor = "you"): Promise<void> {
   const docker = await getDocker()
-  const services = await db.service.findMany({ where: { projectId } })
-  for (const s of services) {
-    if (s.dockerContainerId) {
-      try {
-        await docker.getContainer(s.dockerContainerId).remove({ force: true })
-      } catch {
-        /* ignore */
-      }
+  const ids = await projectContainerIds(projectId)
+  for (const id of ids) {
+    try {
+      await docker.getContainer(id).remove({ force: true })
+    } catch {
+      /* ignore */
     }
   }
   void actor
+}
+
+// Live, non-destructive `docker update` for resource limits. Only applied when
+// the project has a real container; otherwise the row edit is metadata-only
+// (applied on next deploy). Renaming the real container is intentionally NOT
+// done — the container name is the Docker identity other tools may reference;
+// the project name is just Slipway's label.
+export async function realUpdateContainer(
+  projectId: string,
+  patch: { memoryMb?: number; cpuMilli?: number },
+  actor = "you"
+): Promise<void> {
+  const project = await db.project.findUnique({
+    where: { id: projectId },
+    select: { dockerContainerId: true },
+  })
+  if (!project?.dockerContainerId) return
+  const docker = await getDocker()
+  const c = docker.getContainer(project.dockerContainerId)
+  const upd: { Memory?: number; NanoCpus?: number } = {}
+  if (patch.memoryMb !== undefined) upd.Memory = patch.memoryMb * 1024 * 1024
+  if (patch.cpuMilli !== undefined) upd.NanoCpus = Math.round((patch.cpuMilli / 1000) * 1e9)
+  if (Object.keys(upd).length) {
+    try {
+      await c.update(upd)
+    } catch (e) {
+      console.error("[docker-ops] live update failed:", (e as Error).message)
+    }
+  }
+  void actor
+}
+
+// Recreate the project's real container applying Slipway's config: image
+// (project.dockerImage), env vars, start command, and resource limits. The
+// existing container is inspected first so its named volumes, networks, port
+// bindings and labels are preserved — only env/image/cmd/resources are
+// overlaid. This is the real "edit the app and have it take effect": env/cmd
+// can't change on a running container, so the container is recreated (brief
+// downtime). Honest: throws on failure so the API returns 500, no fake success.
+export async function realReconcile(projectId: string, actor = "you"): Promise<string> {
+  const project = await db.project.findUnique({
+    where: { id: projectId },
+    include: { envVars: true },
+  })
+  if (!project) throw new Error("Project not found")
+  if (!project.dockerContainerId) throw new Error("No real container to reconcile — deploy the project first")
+  const docker = await getDocker()
+  const old = docker.getContainer(project.dockerContainerId)
+  const info = await old.inspect()
+
+  const image = project.dockerImage || info.Config.Image || ""
+  if (!image) throw new Error("No image to reconcile to")
+
+  // Env: keep the container's existing env (minus PATH, which the image sets),
+  // then overlay Slipway's env vars (last write wins per key).
+  const envMap = new Map<string, string>()
+  for (const e of info.Config.Env || []) {
+    const i = e.indexOf("=")
+    if (i > 0 && e.slice(0, i) !== "PATH") envMap.set(e.slice(0, i), e.slice(i + 1))
+  }
+  for (const e of project.envVars) {
+    if (e.scope === "all" || e.scope === project.environment) envMap.set(e.key, e.value)
+  }
+  const Env = [...envMap].map(([k, v]) => `${k}=${v}`)
+  const Cmd = project.startCmd ? project.startCmd.split(/\s+/).filter(Boolean) : info.Config.Cmd || undefined
+
+  const hc = (info.HostConfig || {}) as Docker.HostConfig
+  const HostConfig: Docker.HostConfig = {
+    RestartPolicy: { Name: "unless-stopped" },
+    PortBindings: hc.PortBindings || {},
+    Memory: project.memoryMb ? project.memoryMb * 1024 * 1024 : hc.Memory,
+    NanoCpus: project.cpuMilli ? Math.round((project.cpuMilli / 1000) * 1e9) : hc.NanoCpus,
+  }
+  // preserve named-volume binds (data volumes survive the recreate)
+  const binds = (info.Mounts || [])
+    .filter((m) => m.Type === "volume" && m.Name)
+    .map((m) => `${m.Name}:${m.Destination}`)
+  if (binds.length) HostConfig.Binds = binds
+
+  // rejoin the same networks
+  const nets = info.NetworkSettings?.Networks || {}
+  const EndpointsConfig: Record<string, Docker.EndpointSettings> = {}
+  for (const name of Object.keys(nets)) EndpointsConfig[name] = {}
+  const NetworkingConfig = Object.keys(EndpointsConfig).length ? { EndpointsConfig } : undefined
+
+  const name = (info.Name || "").replace(/^\//, "")
+  await old.stop().catch(() => {})
+  await old.remove({ force: true }).catch(() => {})
+
+  const created = await docker.createContainer({
+    Image: image,
+    name: name || undefined,
+    Env,
+    ...(Cmd ? { Cmd } : {}),
+    HostConfig,
+    ...(NetworkingConfig ? { NetworkingConfig } : {}),
+    ...(info.Config.Labels && Object.keys(info.Config.Labels).length ? { Labels: info.Config.Labels } : {}),
+  })
+  await created.start()
+
+  await db.project.update({
+    where: { id: projectId },
+    data: { dockerContainerId: created.id, status: "running" },
+  })
+  await db.service.updateMany({
+    where: { projectId },
+    data: { dockerContainerId: created.id, status: "running" },
+  })
+  await recordActivity("deploy", `applied config changes to ${project.name} (container recreated)`, {
+    projectId,
+    actor,
+  })
+  return created.id
+}
+
+// Restart a real database container (managed or scanned/imported).
+export async function realRestartDatabase(dbId: string, actor = "you"): Promise<void> {
+  const docker = await getDocker()
+  const row = await db.databaseInstance.findUnique({
+    where: { id: dbId },
+    select: { dockerContainerId: true, name: true },
+  })
+  if (!row) throw new Error("Database not found")
+  if (!row.dockerContainerId) throw new Error("No real container for this database")
+  await docker.getContainer(row.dockerContainerId).restart()
+  await db.databaseInstance.update({ where: { id: dbId }, data: { status: "running" } })
+  await recordActivity("database", `restarted database ${row.name}`, { actor })
 }
 
 export async function realScale(

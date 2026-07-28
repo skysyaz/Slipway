@@ -30,6 +30,7 @@ import {
   Star,
   Pencil,
   Trash2,
+  Loader2,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -586,13 +587,24 @@ function ServicesTab({ project, onAddService, onRestart }: { project: Project; o
 }
 
 function DomainsTab({ project, onAddDomain }: { project: Project; onAddDomain: () => void }) {
+  const { toast } = useToast()
+  const deleteDomain = useSlipway((s) => s.deleteDomain)
+  const remove = async (dom: { id: string; hostname: string }) => {
+    if (!window.confirm(`Remove domain ${dom.hostname} from ${project.name}?`)) return
+    try {
+      await deleteDomain(project.id, dom.id)
+      toast({ title: 'Domain removed', description: dom.hostname })
+    } catch (e) {
+      toast({ title: 'Failed', description: e instanceof ApiError ? e.message : 'error', variant: 'destructive' })
+    }
+  }
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
           <h3 className="text-[15px] font-semibold">Domains & SSL</h3>
           <p className="text-[12px] text-muted-foreground mt-0.5">
-            Slipway provisions TLS certificates via Let’s Encrypt and renews them automatically. Add custom domains or route preview branches.
+            Slipway records domains and checks SSL. The reverse proxy (Traefik) is managed separately, so routing is not changed here.
           </p>
         </div>
         <Button variant="outline" size="sm" className="h-9 gap-2" onClick={onAddDomain}>
@@ -601,6 +613,9 @@ function DomainsTab({ project, onAddDomain }: { project: Project; onAddDomain: (
         </Button>
       </div>
       <div className="rounded-xl border border-border bg-card overflow-hidden">
+        {project.domains.length === 0 && (
+          <div className="p-8 text-center text-[13px] text-muted-foreground">No domains yet.</div>
+        )}
         {project.domains.map((dom, i) => (
           <div key={dom.id} className={cn('p-4 flex items-center gap-3', i !== project.domains.length - 1 && 'border-b border-border')}>
             <div className="w-9 h-9 rounded-lg bg-muted flex items-center justify-center shrink-0">
@@ -624,6 +639,9 @@ function DomainsTab({ project, onAddDomain }: { project: Project; onAddDomain: (
               </div>
             </div>
             <StatusDot status={dom.status} />
+            <Button variant="ghost" size="sm" className="h-8 w-8 p-0 text-rose-500 hover:text-rose-500 shrink-0" title="Remove domain" onClick={() => void remove(dom)}>
+              <Trash2 size={13} />
+            </Button>
           </div>
         ))}
       </div>
@@ -634,11 +652,26 @@ function DomainsTab({ project, onAddDomain }: { project: Project; onAddDomain: (
 function EnvTab({ project }: { project: Project }) {
   const { toast } = useToast()
   const refetch = useSlipway((s) => s.refetch)
+  const reconcileProject = useSlipway((s) => s.reconcileProject)
   const vars = project.envVars
   const [newKey, setNewKey] = React.useState('')
   const [newValue, setNewValue] = React.useState('')
   const [newScope, setNewScope] = React.useState('all')
   const [revealed, setRevealed] = React.useState<Record<string, boolean>>({})
+  const [applying, setApplying] = React.useState(false)
+
+  const applyToContainer = async () => {
+    if (!window.confirm(`Recreate the real container for ${project.name} so the new env vars take effect? Brief downtime; named data volumes are preserved.`)) return
+    setApplying(true)
+    try {
+      await reconcileProject(project.id)
+      toast({ title: 'Env applied', description: `${project.name} container recreated with the new env vars.` })
+    } catch (e) {
+      toast({ title: 'Apply failed', description: e instanceof ApiError ? e.message : 'error', variant: 'destructive' })
+    } finally {
+      setApplying(false)
+    }
+  }
 
   const copyVal = (v: string) => {
     navigator.clipboard?.writeText(v)
@@ -678,9 +711,15 @@ function EnvTab({ project }: { project: Project }) {
         <div>
           <h3 className="text-[15px] font-semibold">Environment variables</h3>
           <p className="text-[12px] text-muted-foreground mt-0.5">
-            Stored in the Slipway database. Variables can be scoped to environments (production, staging, preview). Changes trigger a rolling restart.
+            Stored in the Slipway database. Variables can be scoped to environments (production, staging, preview). Env vars only take effect when the container is created — use <b>Apply to container</b> to recreate it with the new vars.
           </p>
         </div>
+        {project.dockerContainerId && (
+          <Button size="sm" className="h-8 gap-2 shrink-0" disabled={applying} onClick={() => void applyToContainer()}>
+            {applying ? <Loader2 size={13} className="animate-spin" /> : <RotateCcw size={13} />}
+            Apply to container
+          </Button>
+        )}
       </div>
 
       <div className="rounded-xl border border-border bg-card overflow-hidden">
@@ -931,6 +970,7 @@ function SettingsTab({ project }: { project: Project }) {
   const { toast } = useToast()
   const refetch = useSlipway((s) => s.refetch)
   const setView = useSlipway((s) => s.setView)
+  const reconcileProject = useSlipway((s) => s.reconcileProject)
 
   const [name, setName] = React.useState(project.name)
   const [slug, setSlug] = React.useState(project.slug)
@@ -939,6 +979,20 @@ function SettingsTab({ project }: { project: Project }) {
   const [maxReplicas, setMaxReplicas] = React.useState(project.maxReplicas)
   const [memoryMb, setMemoryMb] = React.useState(project.memoryMb)
   const [cpuMilli, setCpuMilli] = React.useState(project.cpuMilli)
+  const [applying, setApplying] = React.useState(false)
+
+  const applyToContainer = async () => {
+    if (!window.confirm(`Recreate the real container for ${project.name} with the current image, env vars, start command, and resource limits? The container has brief downtime; named data volumes are preserved.`)) return
+    setApplying(true)
+    try {
+      await reconcileProject(project.id)
+      toast({ title: 'Changes applied', description: `${project.name} container recreated with the new config.` })
+    } catch (e) {
+      toast({ title: 'Apply failed', description: e instanceof ApiError ? e.message : 'error', variant: 'destructive' })
+    } finally {
+      setApplying(false)
+    }
+  }
 
   const patch = async (data: Record<string, unknown>, msg = 'Project settings updated.') => {
     try {
@@ -1008,6 +1062,23 @@ function SettingsTab({ project }: { project: Project }) {
           <ToggleRow label="PR preview environments" description="Spin up a temporary environment for every pull request." checked={project.prPreviews} onChange={(v) => toggle('prPreviews', v)} />
         </div>
       </SettingsCard>
+
+      {project.dockerContainerId && (
+        <SettingsCard title="Container" description="Apply Slipway's config to the real Docker container running this project.">
+          <div className="space-y-3">
+            <p className="text-[12px] text-muted-foreground leading-snug">
+              Env vars, image, start command, and resource limits are stored in Slipway. Resource limits apply live via <code className="font-mono">docker update</code> when you save. Env vars, image, and start command can&apos;t change on a running container — use <b>Apply to container</b> to recreate it with the new config (brief downtime; named data volumes and networks are preserved).
+            </p>
+            <div className="flex items-center gap-2 flex-wrap">
+              <Button size="sm" className="h-8 gap-2" disabled={applying} onClick={() => void applyToContainer()}>
+                {applying ? <Loader2 size={13} className="animate-spin" /> : <RotateCcw size={13} />}
+                Apply to container
+              </Button>
+              <span className="text-[11px] text-muted-foreground font-mono">container: {project.dockerContainerId.slice(0, 12)}</span>
+            </div>
+          </div>
+        </SettingsCard>
+      )}
 
       <SettingsCard title="Resources" description="Per-project resource limits. Slipway will autoscale within these bounds.">
         <div className="grid grid-cols-2 gap-4">

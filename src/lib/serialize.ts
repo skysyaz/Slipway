@@ -61,6 +61,7 @@ export function serializeProject(p: ProjectRow) {
     startCmd: p.startCmd ?? undefined,
     paused: p.paused,
     dockerImage: p.dockerImage ?? undefined,
+    dockerContainerId: p.dockerContainerId ?? undefined,
   }
 }
 

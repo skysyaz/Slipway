@@ -22,7 +22,9 @@ export type EventKind =
   | "database.failed"
   | "database.deleted"
   | "volume.created"
+  | "volume.deleted"
   | "domain.added"
+  | "domain.removed"
   | "server.connected"
   | "system"
 

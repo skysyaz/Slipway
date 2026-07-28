@@ -70,7 +70,7 @@ export function DatabasesView() {
   const databases = useSlipway((s) => s.databases)
   const projects = useSlipway((s) => s.projects)
   const setNewDatabaseOpen = useSlipway((s) => s.setNewDatabaseOpen)
-  const restartService = useSlipway((s) => s.restartService)
+  const restartDatabase = useSlipway((s) => s.restartDatabase)
   const runBackup = useSlipway((s) => s.runBackup)
   const selectProject = useSlipway((s) => s.selectProject)
   const [query, setQuery] = React.useState('')
@@ -189,7 +189,7 @@ export function DatabasesView() {
                   created <TimeAgo ts={db.createdAt} className="text-[10px]" />
                 </div>
                 <div className="flex items-center gap-1">
-                  <Button variant="outline" size="sm" className="h-7 text-[11px]" onClick={() => restartService('prj-api', db.id)}>
+                  <Button variant="outline" size="sm" className="h-7 text-[11px]" onClick={() => restartDatabase(db.id)}>
                     <RotateCcw size={10} className="mr-1" />
                     Restart
                   </Button>

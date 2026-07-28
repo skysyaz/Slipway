@@ -14,6 +14,9 @@ import {
   realStop,
   realRemove,
   realScale,
+  realUpdateContainer,
+  realReconcile,
+  realRestartDatabase,
 } from "./docker-ops"
 import { simulateRollback, type DeployOptions } from "./simulate"
 
@@ -25,6 +28,9 @@ export const runBackup = realBackup
 export const stopProject = realStop
 export const removeProject = realRemove
 export const scaleProject = realScale
+export const updateContainer = realUpdateContainer
+export const reconcileProject = realReconcile
+export const restartDatabase = realRestartDatabase
 
 export async function rollbackDeployment(deploymentId: string, actor = "you") {
   return simulateRollback(deploymentId, actor)

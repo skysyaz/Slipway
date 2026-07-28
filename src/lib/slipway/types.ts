@@ -123,6 +123,7 @@ export interface Project {
   startCmd?: string
   paused: boolean
   dockerImage?: string
+  dockerContainerId?: string
 }
 
 export interface Service {
