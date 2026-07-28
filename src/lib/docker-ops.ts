@@ -732,6 +732,10 @@ async function runPipeline(
       // verify: container is running
       await begin(9)
       if (containerId) {
+        // ponytail: same settle window as DB provision — Next.js / Node apps
+        // often bind a moment after start(); inspecting immediately falsely
+        // reported crash-loops that were still booting.
+        await sleep(2500)
         const c = docker.getContainer(containerId)
         const info = await c.inspect()
         const running = info.State?.Running === true
@@ -816,16 +820,32 @@ async function runPipeline(
 async function runCli(args: string[]): Promise<{ stdout: string; stderr: string }> {
   const { execFile } = await import("node:child_process")
   return new Promise((resolve, reject) => {
-    execFile("docker", args, { maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
-      if (err) {
-        const tail = (stderr || err.message || "").trim().slice(-1200)
-        const e = new Error(`docker ${args.join(" ")} failed: ${tail || err.message}`)
-        ;(e as Error & { stderr?: string }).stderr = tail
-        reject(e)
-      } else {
-        resolve({ stdout: stdout || "", stderr: stderr || "" })
+    execFile(
+      "docker",
+      args,
+      {
+        maxBuffer: 4 * 1024 * 1024,
+        env: {
+          ...process.env,
+          // ponytail: without these, alpine's docker-cli falls back to the
+          // legacy builder and any Dockerfile using `RUN --mount=…` fails with
+          // "the --mount option requires BuildKit" — the exact error helix-web
+          // hit after checkout started working.
+          DOCKER_BUILDKIT: "1",
+          COMPOSE_DOCKER_CLI_BUILD: "1",
+        },
+      },
+      (err, stdout, stderr) => {
+        if (err) {
+          const tail = (stderr || err.message || "").trim().slice(-1200)
+          const e = new Error(`docker ${args.join(" ")} failed: ${tail || err.message}`)
+          ;(e as Error & { stderr?: string }).stderr = tail
+          reject(e)
+        } else {
+          resolve({ stdout: stdout || "", stderr: stderr || "" })
+        }
       }
-    })
+    )
   })
 }
 
@@ -968,6 +988,11 @@ function stackLabelFor(stack: DetectedStack): string {
  * only the socket mounted. Streaming a tar of the directory on stdin
  * (`docker build -`) sends the context to the daemon over the API — the only
  * reliable way to build from a checkout that lives in the manager container.
+ *
+ * ponytail: always enable BuildKit. Public repos (Next.js, etc.) ship
+ * Dockerfiles with `RUN --mount=type=cache,…` which the legacy builder
+ * rejects. Prefer `docker buildx build --load` when the plugin is present;
+ * fall back to `DOCKER_BUILDKIT=1 docker build`.
  */
 async function dockerBuildFromDir(
   contextDir: string,
@@ -975,15 +1000,45 @@ async function dockerBuildFromDir(
   tags: string[]
 ): Promise<void> {
   const { spawn } = await import("node:child_process")
-  const args = ["build", "-f", dockerfileName]
+  const buildEnv = {
+    ...process.env,
+    DOCKER_BUILDKIT: "1",
+    COMPOSE_DOCKER_CLI_BUILD: "1",
+    BUILDKIT_PROGRESS: "plain",
+  }
+
+  const useBuildx = await dockerBuildxAvailable()
+  const args = useBuildx
+    ? ["buildx", "build", "--load", "--progress=plain", "-f", dockerfileName]
+    : ["build", "--progress=plain", "-f", dockerfileName]
   for (const t of tags) {
     args.push("-t", t)
   }
   args.push("-")
 
   await new Promise<void>((resolve, reject) => {
-    const tar = spawn("tar", ["-C", contextDir, "-cf", "-", "."], { stdio: ["ignore", "pipe", "pipe"] })
-    const build = spawn("docker", args, { stdio: ["pipe", "pipe", "pipe"] })
+    const tar = spawn(
+      "tar",
+      [
+        "-C",
+        contextDir,
+        // Keep the context small and free of host junk. .git alone can be
+        // hundreds of MB on a shallow clone's pack — BuildKit doesn't need it.
+        "--exclude=.git",
+        "--exclude=node_modules",
+        "--exclude=.next",
+        "--exclude=dist",
+        "--exclude=coverage",
+        "-cf",
+        "-",
+        ".",
+      ],
+      { stdio: ["ignore", "pipe", "pipe"] }
+    )
+    const build = spawn("docker", args, {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: buildEnv,
+    })
     let stderr = ""
     tar.stdout.pipe(build.stdin)
     tar.stderr.on("data", (d: Buffer) => {
@@ -992,8 +1047,9 @@ async function dockerBuildFromDir(
     build.stderr.on("data", (d: Buffer) => {
       stderr += d.toString()
     })
-    build.stdout.on("data", () => {
-      /* drain */
+    build.stdout.on("data", (d: Buffer) => {
+      // buildx prints progress on stdout when --progress=plain
+      stderr += d.toString()
     })
     let tarCode: number | null = null
     let buildCode: number | null = null
@@ -1026,6 +1082,19 @@ async function dockerBuildFromDir(
       maybeDone()
     })
   })
+}
+
+/** True when `docker buildx version` works (plugin installed). Cached. */
+let buildxCached: boolean | null = null
+async function dockerBuildxAvailable(): Promise<boolean> {
+  if (buildxCached !== null) return buildxCached
+  try {
+    await runCli(["buildx", "version"])
+    buildxCached = true
+  } catch {
+    buildxCached = false
+  }
+  return buildxCached
 }
 
 // Every real container id tied to a project: the project's own container

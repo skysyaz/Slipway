@@ -302,11 +302,11 @@ export function defaultPortFor(stack: DetectedStack): number {
   }
 }
 
-/** Parse the first EXPOSE port from a Dockerfile (best-effort). */
+/** Parse the last EXPOSE port from a Dockerfile (final stage wins). */
 export function parseExposePort(dockerfile: string): number | null {
-  const m = dockerfile.match(/^\s*EXPOSE\s+(\d+)/im)
-  if (!m) return null
-  const n = Number(m[1])
+  const matches = [...String(dockerfile).matchAll(/^\s*EXPOSE\s+(\d+)/gim)]
+  if (!matches.length) return null
+  const n = Number(matches[matches.length - 1][1])
   return Number.isFinite(n) && n > 0 ? n : null
 }
 
