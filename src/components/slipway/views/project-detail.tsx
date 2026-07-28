@@ -52,6 +52,7 @@ import type { Project, Deployment, Service } from '@/lib/slipway/types'
 export function ProjectDetailView() {
   const selectedId = useSlipway((s) => s.selectedProjectId)
   const project = useSlipway((s) => s.projects.find((p) => p.id === selectedId))
+  const hydrated = useSlipway((s) => s.hydrated)
   const setView = useSlipway((s) => s.setView)
   const setNewDeploymentOpen = useSlipway((s) => s.setNewDeploymentOpen)
   const triggerDeployment = useSlipway((s) => s.triggerDeployment)
@@ -60,9 +61,41 @@ export function ProjectDetailView() {
   const setAddServiceOpen = useSlipway((s) => s.setAddServiceOpen)
   const setNewBackupOpen = useSlipway((s) => s.setNewBackupOpen)
   const restartService = useSlipway((s) => s.restartService)
-  const [tab, setTab] = React.useState('overview')
+  // META-RULE 1: tab lives in the URL, not local state.
+  const projectTab = useSlipway((s) => s.projectTab)
+  const setProjectTab = useSlipway((s) => s.setProjectTab)
+  const VALID_TABS = ['overview', 'deployments', 'services', 'domains', 'env', 'logs', 'metrics', 'backups', 'settings']
+  const tab = projectTab && VALID_TABS.includes(projectTab) ? projectTab : 'overview'
+
+  // Redirect-race guard: do NOT bounce to projects while the list is still
+  // loading — a refresh lands here before hydrate() resolves, so a naive
+  // `if (!project) redirect` fired before the id could be found. Only redirect
+  // once hydrated AND the id is truly absent.
+  const shouldRedirect = hydrated && !project
+
+  React.useEffect(() => {
+    if (shouldRedirect) setView('projects')
+  }, [shouldRedirect, setView])
+
+  // Scroll the active tab chip into view on change/refresh (tab strip is an
+  // internally-scrollable strip per META-RULE 3).
+  const tabsRef = React.useRef<HTMLDivElement | null>(null)
+  React.useEffect(() => {
+    const el = tabsRef.current?.querySelector('[data-state="active"]')
+    el?.scrollIntoView({ inline: 'center', block: 'nearest' })
+  }, [tab])
 
   if (!project) {
+    if (!hydrated) {
+      return (
+        <div className="space-y-4 animate-pulse">
+          <div className="h-8 w-40 rounded bg-muted" />
+          <div className="h-24 rounded-xl bg-muted" />
+          <div className="h-10 rounded bg-muted" />
+          <div className="h-64 rounded-xl bg-muted" />
+        </div>
+      )
+    }
     return (
       <div className="text-center py-16 text-muted-foreground">
         <p>Project not found.</p>
@@ -129,8 +162,9 @@ export function ProjectDetailView() {
         <UrlBadge url={project.url} domains={project.domains} />
       )}
 
-      <Tabs value={tab} onValueChange={setTab}>
-        <TabsList className="bg-transparent border-b border-border rounded-none w-full h-auto p-0 justify-start overflow-x-auto scroll-smooth" style={{ scrollbarWidth: 'none' }}>
+      <Tabs value={tab} onValueChange={setProjectTab}>
+        <div ref={tabsRef} className="min-w-0 overflow-x-auto" style={{ scrollbarWidth: 'none', scrollSnapType: 'x proximity' }}>
+        <TabsList className="bg-transparent border-b border-border rounded-none h-auto p-0 justify-start w-max min-w-full">
           <TabsTrigger value="overview" className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent">
             Overview
           </TabsTrigger>
@@ -159,6 +193,7 @@ export function ProjectDetailView() {
             Settings
           </TabsTrigger>
         </TabsList>
+        </div>
 
         <TabsContent value="overview" className="mt-5">
           <OverviewTab project={project} onRollbackClick={(d) => setRollbackTarget(d)} />
@@ -171,7 +206,7 @@ export function ProjectDetailView() {
             project={project}
             onAddService={() => setAddServiceOpen(true)}
             onRestart={(serviceId) => restartService(project.id, serviceId)}
-            onOpenLogs={() => setTab('logs')}
+            onOpenLogs={() => setProjectTab('logs')}
           />
         </TabsContent>
         <TabsContent value="domains" className="mt-5">

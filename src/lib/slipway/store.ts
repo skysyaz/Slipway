@@ -40,6 +40,8 @@ interface SlipwayState {
   // navigation
   view: NavView
   selectedProjectId: string | null
+  projectTab: string | null
+  setProjectTab: (tab: string) => void
   serviceLogScope: string | null
   setServiceLogScope: (name: string | null) => void
   setView: (view: NavView) => void
@@ -231,19 +233,26 @@ const VIEW_SET: ReadonlySet<NavView> = new Set<NavView>([
   'overview', 'projects', 'project-detail', 'deployments', 'databases', 'storage',
   'domains', 'metrics', 'logs', 'backups', 'previews', 'settings', 'cli',
 ])
-function parseHash(): { view: NavView; projectId: string | null } {
-  if (typeof window === 'undefined') return { view: 'overview', projectId: null }
+function parseHash(): { view: NavView; projectId: string | null; tab: string | null } {
+  if (typeof window === 'undefined') return { view: 'overview', projectId: null, tab: null }
   const raw = window.location.hash.replace(/^#/, '')
-  if (!raw) return { view: 'overview', projectId: null }
-  const [v, pid] = raw.split('/')
+  if (!raw) return { view: 'overview', projectId: null, tab: null }
+  const [v, pid, tab] = raw.split('/')
   const view = VIEW_SET.has(v as NavView) ? (v as NavView) : 'overview'
   const projectId = view === 'project-detail' && pid ? pid : null
-  return { view, projectId }
+  return { view, projectId, tab: view === 'project-detail' && tab ? tab : null }
 }
-function writeHash(view: NavView, projectId: string | null) {
+function writeHash(view: NavView, projectId: string | null, tab?: string | null, replace = false) {
   if (typeof window === 'undefined') return
-  const hash = view === 'project-detail' && projectId ? `#project-detail/${projectId}` : `#${view}`
-  if (window.location.hash !== hash) window.location.hash = hash
+  const base = view === 'project-detail' && projectId ? `project-detail/${projectId}` : view
+  const hash = `#${base}${view === 'project-detail' && tab ? `/${tab}` : ''}`
+  if (replace) {
+    const url = new URL(window.location.href)
+    url.hash = hash
+    window.history.replaceState(null, '', url.href)
+  } else if (window.location.hash !== hash) {
+    window.location.hash = hash
+  }
 }
 
 // ponytail: the env filter is a URL query param (?env=production|staging|preview;
@@ -280,10 +289,12 @@ export const useSlipway = create<SlipwayState>((set, get) => {
       if (cur.view !== p.view) {
         set({
           view: p.view,
-          ...(p.view === 'project-detail' && p.projectId ? { selectedProjectId: p.projectId } : {}),
+          ...(p.view === 'project-detail' && p.projectId ? { selectedProjectId: p.projectId, projectTab: p.tab } : {}),
         })
       } else if (p.view === 'project-detail' && p.projectId && cur.selectedProjectId !== p.projectId) {
-        set({ selectedProjectId: p.projectId })
+        set({ selectedProjectId: p.projectId, projectTab: p.tab })
+      } else if (p.view === 'project-detail' && cur.projectTab !== p.tab) {
+        set({ projectTab: p.tab })
       }
     })
     // ponytail: Back/Forward over env (a query-only change) fires popstate but
@@ -297,10 +308,19 @@ export const useSlipway = create<SlipwayState>((set, get) => {
   return {
   view: initial.view,
   selectedProjectId: initial.projectId,
+  projectTab: initial.tab,
   serviceLogScope: null,
   setServiceLogScope: (name) => set({ serviceLogScope: name }),
   setView: (view) => { writeHash(view, get().selectedProjectId); set({ view }) },
   selectProject: (id) => { writeHash('project-detail', id); set({ selectedProjectId: id, view: 'project-detail' }) },
+  // META-RULE 1: the active project tab lives in the URL (#/project-detail/<id>/<tab>)
+  // so refresh + shareable links + Back/Forward restore the exact tab. Written
+  // with replace so a tab click doesn't push a history entry per chip.
+  setProjectTab: (tab) => {
+    const pid = get().selectedProjectId
+    writeHash('project-detail', pid, tab, true)
+    set({ projectTab: tab })
+  },
 
   env: parseEnvParam(),
   setEnv: (env) => { writeEnvParam(env); set({ env }) },
