@@ -15,6 +15,7 @@
  * we do not fake that routing happened.
  */
 import { promises as fs } from "node:fs"
+import { accessSync } from "node:fs"
 import path from "node:path"
 import { validIp, isPrivateIp } from "./security"
 
@@ -31,10 +32,23 @@ export interface DomainRouteInput {
 }
 
 function dynamicDir(): string {
+  // Bug 1 (root): the config must land where TRAEFIK actually reads it, not in
+  // Slipway's own volume. Precedence:
+  //   1. SLIPWAY_TRAEFIK_DYNAMIC_DIR — explicit operator override.
+  //   2. /etc/dokploy/traefik/dynamic — the Dokploy host path Traefik watches
+  //      (this deployment's proxy). Mounted into the Slipway container via a
+  //      host bind (see docker-compose.yml).
+  //   3. <SLIPWAY_DATA_DIR or ./data>/traefik/dynamic — local/dev fallback.
   const explicit = process.env.SLIPWAY_TRAEFIK_DYNAMIC_DIR?.trim()
   if (explicit) return explicit
-  const base = process.env.SLIPWAY_DATA_DIR?.trim() || path.join(process.cwd(), "data")
-  return path.join(base, "traefik", "dynamic")
+  const dokploy = "/etc/dokploy/traefik/dynamic"
+  try {
+    accessSync(dokploy)
+    return dokploy
+  } catch {
+    const base = process.env.SLIPWAY_DATA_DIR?.trim() || path.join(process.cwd(), "data")
+    return path.join(base, "traefik", "dynamic")
+  }
 }
 
 function isIp(host: string): boolean {

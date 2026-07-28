@@ -297,6 +297,7 @@ function containerName(projectSlug: string, suffix: string): string {
 async function containerConfigFor(projectId: string): Promise<{
   Env: string[]
   Cmd?: string[]
+  WorkingDir?: string
   Memory?: number
   NanoCpus?: number
 }> {
@@ -309,9 +310,18 @@ async function containerConfigFor(projectId: string): Promise<{
     .filter((e) => e.scope === "all" || e.scope === project.environment)
     .map((e) => `${e.key}=${e.value}`)
   const Cmd = project.startCmd ? project.startCmd.split(/\s+/).filter(Boolean) : undefined
+  // Bug 2 (monorepo): the app runs from a subdir (/app/mcp-server) but its deps
+  // (next, etc.) live at the monorepo root's node_modules. Node resolves
+  // modules from CWD upward — a subdir CWD never sees /app/node_modules when the
+  // package is hoisted one level above it. Set the working dir to the subdir AND
+  // add the root node_modules to NODE_PATH so `require("next")` resolves.
+  const subdir = project.monorepo && project.monorepoPath ? project.monorepoPath.replace(/^\/+|\/+$/g, "") : ""
+  const WorkingDir = subdir ? `/app/${subdir}` : undefined
+  if (subdir) Env.push(`NODE_PATH=/app/node_modules:/app/${subdir}/node_modules`)
   return {
     Env,
     ...(Cmd && Cmd.length ? { Cmd } : {}),
+    ...(WorkingDir ? { WorkingDir } : {}),
     ...(project.memoryMb ? { Memory: project.memoryMb * 1024 * 1024 } : {}),
     ...(project.cpuMilli ? { NanoCpus: Math.round((project.cpuMilli / 1000) * 1e9) } : {}),
   }
@@ -703,6 +713,7 @@ async function runPipeline(
             name,
             Env: cfg.Env,
             ...(cfg.Cmd ? { Cmd: cfg.Cmd } : {}),
+            ...(cfg.WorkingDir ? { WorkingDir: cfg.WorkingDir } : {}),
             ExposedPorts: { [`${exposedPort}/tcp`]: {} },
             HostConfig: {
               RestartPolicy: { Name: "unless-stopped" },
@@ -1371,9 +1382,26 @@ export async function realReconcile(projectId: string, actor = "you"): Promise<s
   const Cmd = cfg.Cmd ?? info.Config.Cmd ?? undefined
 
   const hc = (info.HostConfig || {}) as Docker.HostConfig
+  // Bug 3: ensure the app actually publishes a host port so Traefik can reach
+  // it. An older container (or an imported one) may have NO PortBindings, so
+  // even a healthy app is unreachable. Resolve the app's internal port and
+  // publish a host port when the existing config has none.
+  const existingBinds = hc.PortBindings || {}
+  let PortBindings = existingBinds
+  let publishedHostPort: number | null = null
+  const appSvc = await db.service.findFirst({ where: { projectId, kind: "app" }, select: { port: true } })
+  // find the container's exposed internal port
+  const exposed = Object.keys(info.Config?.ExposedPorts || {})
+  const internalPort = exposed.length ? Number(exposed[0].split("/")[0]) : null
+  if (Object.keys(existingBinds).length === 0 && internalPort && Number.isFinite(internalPort)) {
+    // reuse the service's recorded host port if it matches a free one, else pick
+    const hostPort = await pickFreePort(docker, appSvc?.port || internalPort)
+    PortBindings = { [`${internalPort}/tcp`]: [{ HostPort: String(hostPort) }] }
+    publishedHostPort = hostPort
+  }
   const HostConfig: Docker.HostConfig = {
     RestartPolicy: { Name: "unless-stopped" },
-    PortBindings: hc.PortBindings || {},
+    PortBindings,
     Memory: cfg.Memory ?? hc.Memory,
     NanoCpus: cfg.NanoCpus ?? hc.NanoCpus,
   }
@@ -1398,11 +1426,26 @@ export async function realReconcile(projectId: string, actor = "you"): Promise<s
     name: name || undefined,
     Env,
     ...(Cmd ? { Cmd } : {}),
+    ...(cfg.WorkingDir ? { WorkingDir: cfg.WorkingDir } : {}),
     HostConfig,
     ...(NetworkingConfig ? { NetworkingConfig } : {}),
     ...(info.Config.Labels && Object.keys(info.Config.Labels).length ? { Labels: info.Config.Labels } : {}),
   })
   await created.start()
+
+  // Bug 3: if we just published a host port, persist it so the project URL and
+  // the Traefik route point at the reachable binding.
+  if (publishedHostPort) {
+    const publicHost = process.env.SLIPWAY_PUBLIC_HOST?.trim() || "localhost"
+    await db.project.update({
+      where: { id: projectId },
+      data: { url: `http://${publicHost}:${publishedHostPort}` },
+    }).catch(() => {})
+    await db.service.updateMany({
+      where: { projectId, kind: "app" },
+      data: { port: publishedHostPort },
+    }).catch(() => {})
+  }
 
   const fresh = await created.inspect()
   const running = fresh.State?.Running === true
