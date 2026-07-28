@@ -3,6 +3,7 @@ import { db } from "@/lib/db"
 import { serializeServer } from "@/lib/serialize"
 import { emit } from "@/lib/notify"
 import { getHostDiskUsage, bytesToGb } from "@/lib/docker-ops"
+import os from "node:os"
 
 export const dynamic = "force-dynamic"
 
@@ -19,9 +20,20 @@ export const GET = route(async () => {
     s.ip === "127.0.0.1" || s.hostname === "localhost" || s.name === "local"
   return servers.map((s) => {
     const out = serializeServer(s)
-    if (host && isLocalHost(s)) {
-      out.diskGb = bytesToGb(host.totalBytes)
-      out.diskUsedGb = bytesToGb(host.usedBytes)
+    if (isLocalHost(s)) {
+      if (host) {
+        out.diskGb = bytesToGb(host.totalBytes)
+        out.diskUsedGb = bytesToGb(host.usedBytes)
+      }
+      // ponytail: CPU cores and RAM are just as knowable as the disk, and were
+      // just as fake — the seed writes cpuCores: 4 / memoryGb: 16 for every
+      // install, and Settings rendered "4 cores · 16 GB" as fact on machines
+      // that had neither. node:os reports the real numbers for the host this
+      // process runs on, so the local row now matches the machine.
+      out.cpuCores = os.cpus().length || out.cpuCores
+      out.memoryGb = Math.round((os.totalmem() / 1e9) * 10) / 10 || out.memoryGb
+      // uptime is real too; the stored 0 was never updated.
+      out.uptimeHours = Math.floor(os.uptime() / 3600)
     }
     return out
   })
@@ -33,21 +45,31 @@ export const POST = route(async (req, _params, auth) => {
   const server = await db.server.create({
     data: {
       name,
-      hostname: String(body.hostname || `${name}.slipway.run`),
+      // ponytail: no invented identity. The hostname defaulted to
+      // `<name>.slipway.run` — a domain that does not exist and that nothing
+      // resolves — and the OS to "Ubuntu 24.04 LTS" for a machine nobody had
+      // contacted. Fall back to the address the operator actually gave us, and
+      // leave the OS blank until the SSH join probe reads it.
+      hostname: String(body.hostname || body.ip || name),
       ip: String(body.ip || ""),
       role: String(body.role || "worker"),
       status: "offline",
-      os: String(body.os || "Ubuntu 24.04 LTS"),
-      cpuCores: Number(body.cpuCores || 4),
-      memoryGb: Number(body.memoryGb || 16),
-      diskGb: Number(body.diskGb || 200),
+      os: String(body.os || ""),
+      // ponytail: 0 means "not measured yet", not "a 4-core/16 GB/200 GB box".
+      // The join probe fills these in over SSH; the UI renders 0 as "—".
+      cpuCores: Number(body.cpuCores || 0),
+      memoryGb: Number(body.memoryGb || 0),
+      diskGb: Number(body.diskGb || 0),
       region: String(body.region || "local"),
       sshUser: body.sshUser || null,
       sshKeyId: body.sshKeyId || null,
     },
   })
+  // ponytail: "system", not "server.connected" — nothing has connected yet;
+  // the row was recorded and Join has still to run. Firing a connected event
+  // here told every external integration the opposite.
   await emit(
-    "server.connected",
+    "system",
     "server",
     `added server ${name} (${server.ip}) to cluster`,
     {

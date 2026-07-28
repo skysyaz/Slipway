@@ -23,6 +23,7 @@ import { randomBytes } from "node:crypto"
 import { db } from "./db"
 import { emit, recordActivity } from "./notify"
 import { diagnoseDeployError, demuxToString } from "./host-health"
+import { normalizeCommitSha } from "./sanitize-fields"
 import {
   backupSlug,
   parseSizeMarker,
@@ -59,9 +60,13 @@ const STAGE_LABEL: Record<string, string> = {
   live: "Live",
 }
 
-function randSha() {
-  return Math.random().toString(16).slice(2, 9)
-}
+// ponytail: NO invented commit SHAs. Every deployment used to be stamped with
+// `Math.random().toString(16)` — a seven-character hex string the dashboard
+// displayed as the git commit and the rollback dialog quoted back as "This will
+// redeploy commit a3f9c21". For an image deploy there is no commit at all, and
+// for a git build (`docker build <url>`) Slipway never learns the resolved SHA.
+// normalizeCommitSha() keeps a real object id and discards anything else, so
+// the column stays empty and the UI renders "—". See src/lib/sanitize-fields.ts.
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
@@ -313,7 +318,7 @@ export async function realDeploy(
   const deployment = await db.deployment.create({
     data: {
       projectId,
-      commitSha: randSha(),
+      commitSha: normalizeCommitSha((opts as { commitSha?: string }).commitSha),
       commitMessage: opts.commitMessage || "Manual deploy from dashboard",
       branch: opts.branch || "main",
       author: actor,
@@ -1212,26 +1217,46 @@ export async function realSetDatabaseCredentials(
   if (!newPass) throw new Error("A new password is required")
   const username = patch.username?.trim() || row.username || engine.defaultUser || ""
 
+  // ponytail: the username is interpolated into a SQL IDENTIFIER, where quoting
+  // rules differ per engine (" for postgres, ` for mysql, [ ] for mssql) and an
+  // embedded delimiter breaks out of all of them. Escaping three dialects
+  // correctly is a losing game, so restrict the identifier instead: reject
+  // anything that isn't a plain SQL name. Passwords are still escaped below —
+  // they are string literals, where doubling the quote is well defined.
+  if (!/^[A-Za-z_][A-Za-z0-9_$]*$/.test(username)) {
+    throw new Error(
+      `"${username}" isn't a usable database username — use letters, digits and underscores, starting with a letter or underscore.`
+    )
+  }
+
   const docker = await getDocker()
-  // mssql SA password = stored raw + "Aa1!" (complexity suffix), see ENGINE_SPECS
-  const isMssql = row.kind === "mssql"
-  const currentAdmin = isMssql ? `${row.password ?? ""}Aa1!` : row.password ?? ""
-  const newAdmin = isMssql ? `${newPass}Aa1!` : newPass
+  // ponytail: the admin password is EXACTLY what the row stores. This used to
+  // append "Aa1!" for mssql to mirror a suffix that provisioning added only to
+  // the container's env — so the stored value and the real SA password differed.
+  // genPassword() now guarantees complexity itself and provisioning sets the
+  // stored value verbatim, so there is no suffix anywhere. Reintroducing one
+  // here would recreate the "revealed credentials don't work" bug.
+  const currentAdmin = row.password ?? ""
+
+  // Escape a SQL string literal by doubling the quote. Valid for postgres,
+  // mssql, and mysql/mariadb alike (MySQL accepts '' as an escaped quote
+  // regardless of NO_BACKSLASH_ESCAPES, which backslash escaping does not).
+  const lit = (v: string) => v.replace(/'/g, "''")
 
   let cmd: string[]
   switch (row.kind) {
     case "postgres":
-      cmd = ["psql", "-U", username, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", `ALTER USER "${username}" WITH PASSWORD '${newPass.replace(/'/g, "''")}';`]
+      cmd = ["psql", "-U", username, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", `ALTER USER "${username}" WITH PASSWORD '${lit(newPass)}';`]
       break
     case "mysql":
     case "mariadb":
-      cmd = ["mysql", "-u", "root", `-p${currentAdmin}`, "-e", `ALTER USER '${username}'@'%' IDENTIFIED BY '${newPass.replace(/'/g, "\\'")}';`]
+      cmd = ["mysql", "-u", "root", `-p${currentAdmin}`, "-e", `ALTER USER '${username}'@'%' IDENTIFIED BY '${lit(newPass)}';`]
       break
     case "mongodb":
-      cmd = ["mongosh", "--quiet", "-u", "root", "-p", currentAdmin, "--authenticationDatabase", "admin", "--eval", `db.changeUserPassword('${username}','${newPass.replace(/'/g, "\\'")}')`]
+      cmd = ["mongosh", "--quiet", "-u", "root", "-p", currentAdmin, "--authenticationDatabase", "admin", "--eval", `db.changeUserPassword(${JSON.stringify(username)},${JSON.stringify(newPass)})`]
       break
     case "mssql":
-      cmd = ["/opt/mssql-tools18/bin/sqlcmd", "-S", "localhost", "-U", "sa", "-P", currentAdmin, "-C", "-Q", `ALTER LOGIN [${username}] WITH PASSWORD = '${newAdmin.replace(/'/g, "''")}';`]
+      cmd = ["/opt/mssql-tools18/bin/sqlcmd", "-S", "localhost", "-U", "sa", "-P", currentAdmin, "-C", "-Q", `ALTER LOGIN [${username}] WITH PASSWORD = '${lit(newPass)}';`]
       break
     case "redis":
     case "valkey":
@@ -1245,8 +1270,8 @@ export async function realSetDatabaseCredentials(
     throw new Error(`engine rejected the credential change (exit ${exitCode}): ${output.slice(0, 300)}`)
   }
 
-  // store the raw password (without the mssql suffix) so /credentials reveals
-  // exactly what the user set + the suffix they must append for mssql.
+  // Store exactly what was set on the engine — /credentials reveals this value
+  // verbatim and it must be the password that actually works.
   await db.databaseInstance.update({
     where: { id: dbId },
     data: { password: newPass, username },
@@ -1585,7 +1610,12 @@ export async function realBackup(
   schedule?: string,
   actor = "you"
 ): Promise<string> {
-  const docker = await getDocker()
+  // ponytail: record the attempt BEFORE touching Docker. getDocker() throws
+  // when the engine is unreachable, and doing it first meant a failed backup
+  // left no BackupRecord at all — the Backups view stayed empty and the only
+  // evidence was a line in the server's stdout. For a SCHEDULED backup that is
+  // the worst possible failure mode: the operator believes backups are running
+  // while nothing is being written and nothing anywhere says otherwise.
   const startedAt = Date.now()
   const retentionDays = await defaultRetentionFor(target, schedule)
   const backup = await db.backupRecord.create({
@@ -1614,6 +1644,15 @@ export async function realBackup(
       { actor }
     )
     throw new Error(message)
+  }
+
+  let docker: Docker
+  try {
+    docker = await getDocker()
+  } catch (e) {
+    return await fail(
+      `${(e as Error).message} — start Docker on the host and retry, or the schedule will keep failing.`
+    )
   }
 
   try {

@@ -244,7 +244,7 @@ function OverviewTab({ project, onRollbackClick }: { project: Project; onRollbac
               <div className="flex-1 min-w-0">
                 <div className="text-[13px] font-medium">{latest.commitMessage}</div>
                 <div className="text-[11px] text-muted-foreground font-mono mt-0.5">
-                  {latest.commitSha} · {latest.branch} · by {latest.author}
+                  {latest.commitSha || '—'} · {latest.branch} · by {latest.author}
                 </div>
               </div>
               <div className="text-right shrink-0">
@@ -302,7 +302,7 @@ function OverviewTab({ project, onRollbackClick }: { project: Project; onRollbac
                 <div className="flex-1 min-w-0">
                   <div className="text-[12px] truncate">{d.commitMessage}</div>
                   <div className="text-[10px] text-muted-foreground font-mono mt-0.5">
-                    {d.commitSha} · {d.branch}
+                    {d.commitSha || '—'} · {d.branch}
                   </div>
                 </div>
                 <StatusDot status={d.status} />
@@ -429,7 +429,7 @@ function DeploymentsTab({ projectId, onRollbackClick }: { projectId: string; onR
                   )}
                 </div>
                 <div className="text-[11px] text-muted-foreground font-mono mt-1">
-                  {d.commitSha} · {d.branch} · by {d.author}
+                  {d.commitSha || '—'} · {d.branch} · by {d.author}
                 </div>
               </div>
               <div className="text-right shrink-0">
@@ -1071,13 +1071,30 @@ function SettingsTab({ project }: { project: Project }) {
         </div>
       </SettingsCard>
 
-      <SettingsCard title="Build & Deploy" description="Configure how this project is built and released.">
+      {/* ponytail: these five are STORED PREFERENCES ONLY — nothing reads them.
+          Grep for autoDeploy/requireTests/autoRollback/pauseDuringWindows/
+          prPreviews outside the schema, the serializer and this file: the only
+          hit is the PATCH allow-list that persists them. There is no inbound
+          git webhook (so nothing can auto-deploy or react to a PR), the
+          pipeline's "test" stage runs no tests, no health-check watcher exists
+          to auto-roll-back, and deploy windows are not a concept anywhere. They
+          are kept because they round-trip correctly and describe intent, but
+          the card says plainly that they don't act yet — a toggle that silently
+          does nothing is worse than no toggle. */}
+      <SettingsCard
+        title="Build & Deploy"
+        description="Stored for a future release — none of these are acted on by this build yet."
+      >
         <div className="space-y-3">
-          <ToggleRow label="Auto-deploy on push to main" description="Trigger a new deployment when commits land on the main branch." checked={project.autoDeploy} onChange={(v) => toggle('autoDeploy', v)} />
-          <ToggleRow label="Require passing tests" description="Block deploys if any test step fails." checked={project.requireTests} onChange={(v) => toggle('requireTests', v)} />
-          <ToggleRow label="Auto-rollback on health check failure" description="If the new release fails health checks within 60s, automatically roll back." checked={project.autoRollback} onChange={(v) => toggle('autoRollback', v)} />
-          <ToggleRow label="Pause during deploy windows" description="Skip deploys during configured maintenance windows." checked={project.pauseDuringWindows} onChange={(v) => toggle('pauseDuringWindows', v)} />
-          <ToggleRow label="PR preview environments" description="Spin up a temporary environment for every pull request." checked={project.prPreviews} onChange={(v) => toggle('prPreviews', v)} />
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-[12px] text-foreground/80 leading-snug">
+            These preferences persist, but nothing enforces them today. Deploys are triggered manually (dashboard or
+            API), tests aren&apos;t run by the pipeline, and rollback is an explicit action from the Deployments list.
+          </div>
+          <ToggleRow label="Auto-deploy on push to main" description="Intent only — Slipway has no inbound git webhook, so no push can trigger a deploy." checked={project.autoDeploy} onChange={(v) => toggle('autoDeploy', v)} />
+          <ToggleRow label="Require passing tests" description="Intent only — the pipeline's test stage does not execute a test suite." checked={project.requireTests} onChange={(v) => toggle('requireTests', v)} />
+          <ToggleRow label="Auto-rollback on health check failure" description="Intent only — no watcher monitors a release after it goes live. Roll back from the Deployments list." checked={project.autoRollback} onChange={(v) => toggle('autoRollback', v)} />
+          <ToggleRow label="Pause during deploy windows" description="Intent only — maintenance windows aren't configurable anywhere yet." checked={project.pauseDuringWindows} onChange={(v) => toggle('pauseDuringWindows', v)} />
+          <ToggleRow label="PR preview environments" description="Intent only — nothing reacts to a pull request opening or closing." checked={project.prPreviews} onChange={(v) => toggle('prPreviews', v)} />
         </div>
       </SettingsCard>
 

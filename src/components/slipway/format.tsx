@@ -74,13 +74,22 @@ export function lastN(data: number[] | undefined | null): number | undefined {
 export function Sparkline({ data, color = 'oklch(0.7 0.17 158)', height = 32, width = 120 }: { data: number[]; color?: string; height?: number; width?: number }) {
   const id = React.useId()
   if (!data || data.length === 0) return null
-  const max = Math.max(...data)
-  const min = Math.min(...data)
+  // ponytail: guard the single-sample case. `i / (data.length - 1)` is 0/0 with
+  // one point, so every x became NaN and the whole polyline silently failed to
+  // render — and one point is exactly what the metrics buffer holds after the
+  // first poll, i.e. every fresh page load. Draw a flat line across instead.
+  const span = data.length > 1 ? data.length - 1 : 1
+  // Non-finite samples would poison min/max and blank the chart; drop them.
+  const clean = data.filter((v) => Number.isFinite(v))
+  if (clean.length === 0) return null
+  const max = Math.max(...clean)
+  const min = Math.min(...clean)
   const range = max - min || 1
   const points = data
     .map((v, i) => {
-      const x = (i / (data.length - 1)) * width
-      const y = height - ((v - min) / range) * (height - 4) - 2
+      const safe = Number.isFinite(v) ? v : min
+      const x = (i / span) * width
+      const y = height - ((safe - min) / range) * (height - 4) - 2
       return `${x.toFixed(1)},${y.toFixed(1)}`
     })
     .join(' ')

@@ -1,8 +1,15 @@
 import { route } from "@/lib/http"
 import { db } from "@/lib/db"
 import { NextResponse } from "next/server"
+import { redactSecretValue } from "@/lib/sanitize-fields"
 
 export const dynamic = "force-dynamic"
+
+// ponytail: this route's own docstring promises "no secrets", but it dumped
+// every Setting row verbatim — and Settings is exactly where per-server SSH
+// passwords live (`server:<id>:password`, see the server-join route). Exporting
+// the config therefore handed out plaintext SSH credentials in a file people
+// paste into issues and share with support.
 
 // Exports a redacted configuration snapshot (no secrets). The client triggers
 // a file download from this JSON.
@@ -33,7 +40,7 @@ export const GET = route(async (_req, _params, _auth) => {
     webhooks,
     integrations,
     backupSchedules: schedules,
-    settings: Object.fromEntries(settings.map((s) => [s.key, s.value])),
+    settings: Object.fromEntries(settings.map((s) => [s.key, redactSecretValue(s.key, s.value)])),
   }
 
   return NextResponse.json(config, {

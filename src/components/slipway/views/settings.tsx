@@ -166,15 +166,15 @@ function ClusterSettings({ onAddServer }: { onAddServer: () => void }) {
                 <div className="hidden sm:flex items-center gap-4 text-[11px] text-muted-foreground shrink-0">
                   <div className="flex items-center gap-1">
                     <Cpu size={11} />
-                    <span className="font-mono">{s.cpuCores} cores</span>
+                    <span className="font-mono">{s.cpuCores > 0 ? `${s.cpuCores} cores` : '—'}</span>
                   </div>
                   <div className="flex items-center gap-1">
                     <MemoryStick size={11} />
-                    <span className="font-mono">{s.memoryGb} GB</span>
+                    <span className="font-mono">{s.memoryGb > 0 ? `${s.memoryGb} GB` : '—'}</span>
                   </div>
                   <div className="flex items-center gap-1">
                     <HardDrive size={11} />
-                    <span className="font-mono">{s.diskUsedGb.toFixed(1)}/{s.diskGb.toFixed(1)} GB</span>
+                    <span className="font-mono">{s.diskGb > 0 ? `${s.diskUsedGb.toFixed(1)}/${s.diskGb.toFixed(1)} GB` : '—'}</span>
                   </div>
                 </div>
                 <Button

@@ -16,6 +16,8 @@
 export interface DeployOptions {
   branch?: string
   commitMessage?: string
+  /** Real git commit id, when the caller knows one. Never fabricated. */
+  commitSha?: string
   source?: string
   repoUrl?: string
   folderPath?: string

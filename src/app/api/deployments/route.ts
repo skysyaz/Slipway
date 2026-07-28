@@ -28,6 +28,9 @@ export const POST = route(async (req, _params, auth) => {
     {
       branch: body.branch,
       commitMessage: body.commitMessage,
+      // forwarded so a caller that knows the real commit can record it; the
+      // pipeline validates it and stores nothing when it isn't a git object id
+      commitSha: body.commitSha,
       source: body.source,
       repoUrl: body.repoUrl,
       folderPath: body.folderPath,

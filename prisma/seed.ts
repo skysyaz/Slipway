@@ -41,9 +41,12 @@ async function main() {
       role: "manager",
       status: "online",
       os: "local",
-      cpuCores: 4,
-      memoryGb: 16,
-      diskGb: 200,
+      // ponytail: 0 = unmeasured. GET /api/servers overlays the REAL cores /
+      // RAM / disk for the local host from node:os + statfs, so seeding 4/16/200
+      // only ever put a fiction on screen for anyone who read the row directly.
+      cpuCores: 0,
+      memoryGb: 0,
+      diskGb: 0,
       diskUsedGb: 0,
       dockerVersion: "",
       region: "local",

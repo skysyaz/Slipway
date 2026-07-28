@@ -25,7 +25,7 @@ export function PreviewsView() {
         <div>
           <h1 className="text-[22px] font-semibold tracking-tight">Preview environments</h1>
           <p className="text-[13px] text-muted-foreground mt-1">
-            {previews.length} active previews · {stagingProjects.length} staging environments · auto-cleanup after PR close
+            {previews.length} preview {previews.length === 1 ? 'environment' : 'environments'} · {stagingProjects.length} staging
           </p>
         </div>
         <Button size="sm" className="h-9 gap-2" onClick={() => setNewPreviewOpen(true)}>
@@ -40,10 +40,20 @@ export function PreviewsView() {
           <GitPullRequest size={16} className="text-primary" />
         </div>
         <div className="flex-1">
-          <div className="text-[13px] font-semibold">Every PR gets its own environment</div>
+          {/* ponytail: describe what this build ACTUALLY does. The banner used
+              to promise "Slipway builds a disposable preview environment on
+              every pull request — full app, isolated database, wildcard SSL"
+              and "auto-cleanup after PR close". None of it exists: there is no
+              inbound git webhook endpoint anywhere in the codebase, so nothing
+              can react to a PR being opened or closed. Previews are real
+              projects tagged `preview`, created here or via the API. */}
+          <div className="text-[13px] font-semibold">Preview environments</div>
           <p className="text-[12px] text-muted-foreground mt-0.5 leading-relaxed">
-            Slipway builds a disposable preview environment on every pull request — full app, isolated database,
-            wildcard SSL. Branches <code className="font-mono text-[11px]">staging</code> and <code className="font-mono text-[11px]">main</code> promote to staging and production automatically.
+            A preview is a normal Slipway project tagged{' '}
+            <code className="font-mono text-[11px]">preview</code> — its own container, domain and env vars, isolated
+            from production. Create one below or through the API, and delete it when the branch is done.{' '}
+            <strong className="text-foreground font-medium">Automatic per-PR previews aren&apos;t wired up:</strong>{' '}
+            Slipway has no inbound git webhook, so nothing reacts to a pull request opening or closing yet.
           </p>
         </div>
       </div>

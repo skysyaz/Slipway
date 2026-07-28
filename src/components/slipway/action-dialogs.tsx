@@ -120,7 +120,8 @@ export function NewDatabaseDialog() {
     } else {
       setEnvironment(globalEnv && globalEnv !== 'all' ? globalEnv : 'production')
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // deps intentionally limited to `open`: this resets the form when the
+    // dialog opens, and must not re-run as the user edits the fields.
   }, [open])
 
   const versions = databaseVersions[kind] ?? []
@@ -811,7 +812,7 @@ export function NewServerDialog() {
             Add server to cluster
           </DialogTitle>
           <DialogDescription>
-            Slipway connects to the server over SSH, installs Docker, and joins it to your cluster as a worker.
+            Records the server here. Use <b>Join</b> afterwards to reach it over SSH and read its OS and Docker version — Slipway does not install Docker for you.
           </DialogDescription>
         </DialogHeader>
 
@@ -854,8 +855,18 @@ export function NewServerDialog() {
           <Button
             disabled={!ip || !name || submitting}
             onClick={() => run(() => {
-              addServer({ name, hostname: name + '.slipway.run', ip, role, os: 'Ubuntu 24.04 LTS', cpuCores: 4, memoryGb: 16, diskGb: 200, region: 'eu-fra1', sshUser: user, sshKeyId: sshKey })
-              toast({ title: 'Server connected', description: `${name} joined the cluster as ${role}.` })
+              // ponytail: record ONLY what the operator actually told us. This
+              // used to invent a hostname (`<name>.slipway.run`), an OS
+              // ("Ubuntu 24.04 LTS"), 4 cores, 16 GB RAM, a 200 GB disk and a
+              // region ("eu-fra1") for a machine nobody had contacted yet —
+              // all of which the Servers list then displayed as fact. The real
+              // OS and Docker version are discovered by the SSH join probe;
+              // until that runs the row stays honestly blank.
+              addServer({ name, hostname: ip, ip, role, sshUser: user, sshKeyId: sshKey })
+              toast({
+                title: 'Server added',
+                description: `${name} is recorded as ${role} but not connected yet — use Join to reach it over SSH.`,
+              })
             })}
             className="gap-2"
           >

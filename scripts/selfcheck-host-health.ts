@@ -25,6 +25,7 @@ import {
   dumpCommandFor,
   backupExtension,
 } from "../src/lib/backup-format"
+import { redactSecretValue, normalizeCommitSha, REDACTED } from "../src/lib/sanitize-fields"
 
 let n = 0
 const ok = (name: string) => console.log(`  ✓ ${name}`)
@@ -243,6 +244,43 @@ check("dumpCommandFor: unsupported engines refuse instead of faking a dump", () 
   assert.equal(dumpCommandFor("mssql", row, "/backups/x", 1433), null)
   assert.equal(dumpCommandFor("sqlite", row, "/backups/x", 0), null)
   assert.equal(dumpCommandFor("nonsense", row, "/backups/x", 0), null)
+})
+
+// ── sanitize-fields: secrets never leave, SHAs are never invented ───────────
+check("redactSecretValue: credential-ish keys are redacted, others pass through", () => {
+  // the real leak: per-server SSH passwords live in Settings
+  assert.equal(redactSecretValue("server:abc123:password", "hunter2"), REDACTED)
+  assert.equal(redactSecretValue("GITHUB_TOKEN", "ghp_xxx"), REDACTED)
+  assert.equal(redactSecretValue("registry.secret", "s3cret"), REDACTED)
+  assert.equal(redactSecretValue("smtp.credential", "x"), REDACTED)
+  assert.equal(redactSecretValue("api_key", "x"), REDACTED)
+  assert.equal(redactSecretValue("private.pem", "x"), REDACTED)
+  // non-secrets stay readable so the export is still useful
+  assert.equal(redactSecretValue("cluster.id", "helix-eu"), "helix-eu")
+  assert.equal(redactSecretValue("cluster.maintenance", "false"), "false")
+})
+
+check("redactSecretValue: matching is case-insensitive", () => {
+  for (const k of ["PASSWORD", "Secret", "ApiKey", "TOKEN", "Private"]) {
+    assert.equal(redactSecretValue(k, "leak"), REDACTED, `${k} must be redacted`)
+  }
+})
+
+check("normalizeCommitSha: keeps real object ids, discards everything else", () => {
+  assert.equal(normalizeCommitSha("a3f9c21"), "a3f9c21") // short
+  assert.equal(normalizeCommitSha("A3F9C21"), "a3f9c21") // normalised to lower
+  assert.equal(normalizeCommitSha("da39a3ee5e6b4b0d3255bfef95601890afd80709"), "da39a3ee5e6b4b0d3255bfef95601890afd80709")
+  assert.equal(normalizeCommitSha("  a3f9c21  "), "a3f9c21") // trimmed
+})
+
+check("normalizeCommitSha: returns empty rather than inventing a commit", () => {
+  assert.equal(normalizeCommitSha(undefined), "")
+  assert.equal(normalizeCommitSha(null), "")
+  assert.equal(normalizeCommitSha(""), "")
+  assert.equal(normalizeCommitSha("abc"), "") // too short to be an object id
+  assert.equal(normalizeCommitSha("zzzzzzz"), "") // not hex
+  assert.equal(normalizeCommitSha("main"), "")
+  assert.equal(normalizeCommitSha("0".repeat(41)), "") // too long
 })
 
 console.log(`\n  ${n} checks passed ✓`)

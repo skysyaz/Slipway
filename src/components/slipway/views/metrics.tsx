@@ -19,6 +19,31 @@ import { useSlipway } from '@/lib/slipway/store'
 import { Sparkline, BytesShort, lastN } from '../format'
 import { cn } from '@/lib/utils'
 
+/**
+ * ponytail: REAL trend, computed from the series.
+ *
+ * Every chart on this page used to carry a hardcoded badge — `trend: '+12%'`,
+ * `trendUp: true` and so on — rendered next to a live sparkline as though it
+ * had been measured. Requests/sec and p95 latency are not instrumented at all,
+ * so their series are flat zero while the badge cheerfully claimed "+12% ▲".
+ *
+ * Compare the mean of the most recent third of the window against the mean of
+ * the first third. Returns null when there isn't enough data (or no movement)
+ * so the badge is omitted rather than invented.
+ */
+function trendOf(data: number[]): { label: string; up: boolean } | null {
+  if (data.length < 6) return null
+  const bucket = Math.floor(data.length / 3)
+  const mean = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / (xs.length || 1)
+  const before = mean(data.slice(0, bucket))
+  const after = mean(data.slice(-bucket))
+  if (before === 0 && after === 0) return null
+  const deltaPct = before === 0 ? 100 : ((after - before) / Math.abs(before)) * 100
+  if (!Number.isFinite(deltaPct) || Math.abs(deltaPct) < 1) return null
+  const rounded = Math.round(deltaPct)
+  return { label: `${rounded > 0 ? "+" : ""}${rounded}%`, up: rounded > 0 }
+}
+
 export function MetricsView() {
   const metrics = useSlipway((s) => s.metrics)
   const servers = useSlipway((s) => s.servers)
@@ -30,8 +55,6 @@ export function MetricsView() {
       unit: 'req/s',
       color: 'oklch(0.7 0.17 158)',
       icon: Activity,
-      trend: '+12%',
-      trendUp: true,
       big: true,
     },
     {
@@ -40,8 +63,6 @@ export function MetricsView() {
       unit: 'ms',
       color: 'oklch(0.78 0.16 70)',
       icon: Activity,
-      trend: '-8ms',
-      trendUp: true,
       big: true,
     },
     {
@@ -50,8 +71,6 @@ export function MetricsView() {
       unit: '%',
       color: 'oklch(0.65 0.22 25)',
       icon: AlertTriangle,
-      trend: '+0.1%',
-      trendUp: false,
     },
     {
       title: 'CPU usage',
@@ -59,8 +78,6 @@ export function MetricsView() {
       unit: '%',
       color: 'oklch(0.65 0.18 250)',
       icon: Cpu,
-      trend: '+4%',
-      trendUp: false,
     },
     {
       title: 'Memory',
@@ -68,8 +85,6 @@ export function MetricsView() {
       unit: '%',
       color: 'oklch(0.65 0.22 300)',
       icon: MemoryStick,
-      trend: '+2%',
-      trendUp: false,
     },
     {
       title: 'Network in',
@@ -77,8 +92,6 @@ export function MetricsView() {
       unit: 'Mb/s',
       color: 'oklch(0.7 0.15 230)',
       icon: Network,
-      trend: '+18%',
-      trendUp: true,
     },
     {
       title: 'Network out',
@@ -86,8 +99,6 @@ export function MetricsView() {
       unit: 'Mb/s',
       color: 'oklch(0.65 0.18 250)',
       icon: Network,
-      trend: '+11%',
-      trendUp: true,
     },
     {
       title: 'Deploys / day',
@@ -95,8 +106,6 @@ export function MetricsView() {
       unit: '/day',
       color: 'oklch(0.7 0.17 158)',
       icon: TrendingUp,
-      trend: '+12%',
-      trendUp: true,
     },
   ]
 
@@ -105,23 +114,18 @@ export function MetricsView() {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div>
           <h1 className="text-[22px] font-semibold tracking-tight">Metrics</h1>
+          {/* ponytail: describe the REAL window. This said "Last 60 minutes
+              shown · scrape interval: 15s" next to a range picker offering
+              1h/6h/24h/7d/30d — none of which was true or wired to anything.
+              Samples come from an in-process ring buffer (src/lib/metrics.ts)
+              that holds the last 60 samples, one per dashboard poll, and is
+              lost on restart. There is no historical store to select a range
+              from, so the picker is gone rather than decorative. */}
           <p className="text-[13px] text-muted-foreground mt-1">
-            Aggregated across all services in the cluster. Last 60 minutes shown ·{' '}
-            <span className="font-mono">scrape interval: 15s</span>
+            Aggregated across all running containers, sampled from{' '}
+            <span className="font-mono">docker stats</span> on each dashboard poll.
+            Up to 60 samples are held in memory and reset when Slipway restarts.
           </p>
-        </div>
-        <div className="flex items-center gap-1 rounded-md border border-border p-0.5 h-9">
-          {['1h', '6h', '24h', '7d', '30d'].map((r, i) => (
-            <button
-              key={r}
-              className={cn(
-                'px-2.5 h-8 rounded text-[12px] font-mono transition-colors',
-                i === 0 ? 'bg-accent text-foreground font-medium' : 'text-muted-foreground hover:text-foreground',
-              )}
-            >
-              {r}
-            </button>
-          ))}
         </div>
       </div>
 
@@ -133,6 +137,7 @@ export function MetricsView() {
             const Icon = c.icon
             const last = lastN(c.series[0].data)
             const max = Math.max(0, ...c.series[0].data)
+            const trend = trendOf(c.series[0].data)
             return (
               <div key={c.title} className="rounded-xl border border-border bg-card p-4">
                 <div className="flex items-start justify-between">
@@ -148,22 +153,24 @@ export function MetricsView() {
                       <span className="text-[12px] text-muted-foreground">{c.unit}</span>
                     </div>
                   </div>
-                  <span
-                    className={cn(
-                      'inline-flex items-center gap-0.5 text-[11px] font-medium',
-                      c.trendUp ? 'text-emerald-500' : 'text-rose-500',
-                    )}
-                  >
-                    {c.trendUp ? <ArrowUpRight size={11} /> : <ArrowDownRight size={11} />}
-                    {c.trend}
-                  </span>
+                  {trend && (
+                    <span
+                      className={cn(
+                        'inline-flex items-center gap-0.5 text-[11px] font-medium',
+                        trend.up ? 'text-emerald-500' : 'text-rose-500',
+                      )}
+                    >
+                      {trend.up ? <ArrowUpRight size={11} /> : <ArrowDownRight size={11} />}
+                      {trend.label}
+                    </span>
+                  )}
                 </div>
                 <div className="mt-3">
                   <Sparkline data={c.series[0].data} color={c.color} width={460} height={80} />
                 </div>
                 <div className="mt-2 flex items-center justify-between text-[10px] text-muted-foreground font-mono">
                   <span>peak: {max.toFixed(0)} {c.unit}</span>
-                  <span>last 60 min</span>
+                  <span>{c.series[0].data.length} samples</span>
                 </div>
               </div>
             )
@@ -178,6 +185,7 @@ export function MetricsView() {
             const Icon = c.icon
             const last = lastN(c.series[0].data)
             const max = Math.max(0, ...c.series[0].data)
+            const trend = trendOf(c.series[0].data)
             return (
               <div key={c.title} className="rounded-xl border border-border bg-card p-4">
                 <div className="flex items-start justify-between">
@@ -185,15 +193,17 @@ export function MetricsView() {
                     <Icon size={13} style={{ color: c.color }} />
                     {c.title}
                   </div>
-                  <span
-                    className={cn(
-                      'inline-flex items-center gap-0.5 text-[10px] font-medium',
-                      c.trendUp ? 'text-emerald-500' : 'text-rose-500',
-                    )}
-                  >
-                    {c.trendUp ? <TrendingUp size={10} /> : <TrendingDown size={10} />}
-                    {c.trend}
-                  </span>
+                  {trend && (
+                    <span
+                      className={cn(
+                        'inline-flex items-center gap-0.5 text-[10px] font-medium',
+                        trend.up ? 'text-emerald-500' : 'text-rose-500',
+                      )}
+                    >
+                      {trend.up ? <TrendingUp size={10} /> : <TrendingDown size={10} />}
+                      {trend.label}
+                    </span>
+                  )}
                 </div>
                 <div className="flex items-baseline gap-1.5 mt-1.5">
                   <span className="text-[20px] font-semibold tabular-nums">
@@ -221,9 +231,25 @@ export function MetricsView() {
         </div>
         <div className="divide-y divide-border">
           {servers.map((s) => {
-            const diskPct = Math.round((s.diskUsedGb / s.diskGb) * 100)
-            const memPct = Math.round(40 + Math.random() * 30)
-            const cpuPct = Math.round(20 + Math.random() * 40)
+            // ponytail: these two were `Math.round(40 + Math.random() * 30)` and
+            // `Math.round(20 + Math.random() * 40)` — the CPU and Memory bars
+            // were literally random numbers, redrawn on every render, and the
+            // memory bar multiplied the random percentage by the machine's RAM
+            // to print an equally invented "X / Y GB used".
+            //
+            // What is genuinely known: Slipway samples `docker stats` for the
+            // host it runs on (src/lib/metrics.ts), so container CPU% and
+            // memory bytes are real for the LOCAL server. Remote servers have
+            // no agent reporting back, so they get no bar rather than a
+            // fabricated one.
+            const diskPct = s.diskGb > 0 ? Math.round((s.diskUsedGb / s.diskGb) * 100) : null
+            const isLocal = s.ip === '127.0.0.1' || s.hostname === 'localhost' || s.name === 'local'
+            const cpuPct = isLocal ? lastN(metrics.cpu.data.map((p) => p.v)) : undefined
+            const memBytes = isLocal ? lastN(metrics.memory.data.map((p) => p.v)) : undefined
+            const memPct =
+              memBytes != null && s.memoryGb > 0
+                ? Math.min(100, Math.round((memBytes / (s.memoryGb * 1e9)) * 100))
+                : undefined
             return (
               <div key={s.id} className="px-4 py-3">
                 <div className="flex items-center gap-3 mb-2">
@@ -243,9 +269,36 @@ export function MetricsView() {
                   <Badge variant="outline" className="text-[10px]">{s.region}</Badge>
                 </div>
                 <div className="grid grid-cols-3 gap-3">
-                  <ResourceBar label="CPU" pct={cpuPct} value={`${cpuPct}% of ${s.cpuCores} cores`} color="oklch(0.65 0.18 250)" />
-                  <ResourceBar label="Memory" pct={memPct} value={`${Math.round((memPct / 100) * s.memoryGb)} / ${s.memoryGb} GB`} color="oklch(0.65 0.22 300)" />
-                  <ResourceBar label="Disk" pct={diskPct} value={`${diskPct}% · ${s.diskUsedGb.toFixed(1)}/${s.diskGb.toFixed(1)} GB`} color={diskPct > 80 ? 'oklch(0.65 0.22 25)' : 'oklch(0.7 0.17 158)'} />
+                  <ResourceBar
+                    label="CPU"
+                    pct={cpuPct != null ? Math.min(100, Math.round(cpuPct)) : null}
+                    value={
+                      cpuPct != null
+                        ? `${Math.round(cpuPct)}% of ${s.cpuCores} cores`
+                        : 'no agent'
+                    }
+                    color="oklch(0.65 0.18 250)"
+                  />
+                  <ResourceBar
+                    label="Memory"
+                    pct={memPct ?? null}
+                    value={
+                      memBytes != null
+                        ? `${(memBytes / 1e9).toFixed(1)} / ${s.memoryGb} GB in containers`
+                        : 'no agent'
+                    }
+                    color="oklch(0.65 0.22 300)"
+                  />
+                  <ResourceBar
+                    label="Disk"
+                    pct={diskPct}
+                    value={
+                      diskPct != null
+                        ? `${diskPct}% · ${s.diskUsedGb.toFixed(1)}/${s.diskGb.toFixed(1)} GB`
+                        : 'unknown'
+                    }
+                    color={diskPct != null && diskPct > 80 ? 'oklch(0.65 0.22 25)' : 'oklch(0.7 0.17 158)'}
+                  />
                 </div>
               </div>
             )
@@ -256,15 +309,19 @@ export function MetricsView() {
   )
 }
 
-function ResourceBar({ label, pct, value, color }: { label: string; pct: number; value: string; color: string }) {
+// pct is null when the figure genuinely isn't known (no agent on a remote
+// server, or a zero-size disk) — the bar then renders empty rather than
+// implying 0% measured usage.
+function ResourceBar({ label, pct, value, color }: { label: string; pct: number | null | undefined; value: string; color: string }) {
+  const known = pct != null && Number.isFinite(pct)
   return (
     <div>
       <div className="flex items-center justify-between text-[10px] mb-1">
         <span className="text-muted-foreground uppercase tracking-wider font-semibold">{label}</span>
-        <span className="font-mono">{value}</span>
+        <span className={cn('font-mono', !known && 'text-muted-foreground/60')}>{value}</span>
       </div>
       <div className="h-1.5 rounded-full bg-muted overflow-hidden">
-        <div className="h-full" style={{ width: `${pct}%`, background: color }} />
+        {known && <div className="h-full" style={{ width: `${Math.max(0, Math.min(100, pct))}%`, background: color }} />}
       </div>
     </div>
   )

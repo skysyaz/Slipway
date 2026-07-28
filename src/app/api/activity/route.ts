@@ -18,7 +18,10 @@ export const POST = route(async (req, _params, auth) => {
       kind: String(body.kind || "system"),
       message: String(body.message || ""),
       projectId: body.projectId || null,
-      actor: body.actor || auth.username,
+      // ponytail: the actor is WHO IS AUTHENTICATED, never what the body says.
+      // Taking `body.actor` let any caller write audit entries attributed to
+      // someone else, which makes the audit log worthless as evidence.
+      actor: auth.username,
     },
   })
   return serializeActivity(event)

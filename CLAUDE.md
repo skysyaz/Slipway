@@ -64,7 +64,7 @@ Docker Desktop / `dockerd` must be running for anything meaningful to work.
 ### Testing reality
 
 There is **no test framework**. `bun run test` runs a single hand-rolled
-self-check (`scripts/selfcheck-host-health.ts`, 27 checks) using `node:assert`:
+self-check (`scripts/selfcheck-host-health.ts`, 31 checks) using `node:assert`:
 
 - **`src/lib/host-health.ts`** — `diagnoseDeployError`, `parseTraefikLogs`,
   `demuxStream` (dockerode's multiplexed stream framing), `sanitize`. Its
@@ -75,8 +75,11 @@ self-check (`scripts/selfcheck-host-health.ts`, 27 checks) using `node:assert`:
 - **`src/lib/backup-format.ts`** — backup slugs, `shq()` shell quoting (a
   database password is interpolated into `sh -c`, so a quoting bug is command
   injection), `parseSizeMarker`, and the per-engine dump commands.
+- **`src/lib/sanitize-fields.ts`** — `redactSecretValue` (Settings holds SSH
+  passwords, and the config export used to dump them) and `normalizeCommitSha`
+  (deployments were stamped with a random hex string shown as the git commit).
 
-Those three modules are deliberately **pure and import-free** so the self-check
+Those four modules are deliberately **pure and import-free** so the self-check
 runs without a Docker socket, a database, or a generated Prisma client. Keep new
 testable logic out of the modules that import `./db`.
 
@@ -105,6 +108,7 @@ src/
     ops.ts                thin façade re-exporting the real ops
     authz.ts              PURE role/action policy (roleAllows, defaultActionFor)
     backup-format.ts      PURE backup naming, shell quoting, per-engine dump commands
+    sanitize-fields.ts    PURE secret redaction + commit-SHA validation
     host-health.ts        disk/inode/ENOSPC/Traefik diagnosis + log demux + sanitize
     metrics.ts            in-memory ring buffer sampled from `docker stats`
     db.ts                 Prisma singleton + SQLite path resolution
@@ -114,7 +118,8 @@ src/
     api.ts                client-side typed fetch helpers (api.get/post/patch/put/del)
     serialize.ts          Prisma rows → frontend shapes
     notify.ts             emit(): activity + notification + external dispatch
-    scheduler.ts          in-process node-cron (backup schedules, SSL expiry scan)
+    scheduler.ts          in-process node-cron: one task per active BackupSchedule,
+                          reconciled each minute (never hand-match cron yourself)
     slipway/
       store.ts            Zustand store — all client state and actions
       types.ts            domain types (the contract serialize.ts must satisfy)
@@ -231,6 +236,15 @@ activity, pushes an in-app notification, and dispatches to configured external
 integrations (Slack, Discord, Teams, Telegram, PagerDuty, SMTP, generic
 webhooks) in one call. Notification writes are best-effort: never let a failed
 notification fail the operation it describes.
+
+### Stored-but-inert settings
+
+The project deploy-policy flags (`autoDeploy`, `requireTests`, `autoRollback`,
+`pauseDuringWindows`, `prPreviews`) persist and round-trip, but **nothing reads
+them** — there is no inbound git webhook, the pipeline's `test` stage runs no
+tests, and no watcher monitors a release. The Build & Deploy card says so
+explicitly. If you implement one, remove its "intent only" wording in the same
+change; if you add a new flag, wire it up or label it the same way.
 
 ## Conventions to follow
 

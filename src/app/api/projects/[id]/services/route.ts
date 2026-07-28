@@ -20,7 +20,11 @@ export const POST = route(async (req, params, auth) => {
       projectId: params.id,
       name,
       kind: String(body.kind || "worker"),
-      status: "running",
+      // ponytail: a service row created here has NO container behind it —
+      // dockerContainerId is null until a deploy runs. Recording it as
+      // "running" put a green dot on the dashboard for something that did not
+      // exist. "stopped" is the truth until something starts it.
+      status: "stopped",
       image,
       port: body.port ? Number(body.port) : null,
       replicas: Number(body.replicas || 1),
