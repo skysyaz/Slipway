@@ -40,6 +40,8 @@ interface SlipwayState {
   // navigation
   view: NavView
   selectedProjectId: string | null
+  serviceLogScope: string | null
+  setServiceLogScope: (name: string | null) => void
   setView: (view: NavView) => void
   selectProject: (id: string) => void
 
@@ -293,6 +295,8 @@ export const useSlipway = create<SlipwayState>((set, get) => {
   return {
   view: initial.view,
   selectedProjectId: initial.projectId,
+  serviceLogScope: null,
+  setServiceLogScope: (name) => set({ serviceLogScope: name }),
   setView: (view) => { writeHash(view, get().selectedProjectId); set({ view }) },
   selectProject: (id) => { writeHash('project-detail', id); set({ selectedProjectId: id, view: 'project-detail' }) },
 
