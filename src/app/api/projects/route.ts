@@ -2,6 +2,7 @@ import { route } from "@/lib/http"
 import { db } from "@/lib/db"
 import { serializeProject } from "@/lib/serialize"
 import { recordActivity } from "@/lib/notify"
+import { normalizeGitSource } from "@/lib/git-deploy"
 
 export const dynamic = "force-dynamic"
 
@@ -28,12 +29,28 @@ export const POST = route(async (req) => {
   while (await db.project.findUnique({ where: { slug } })) {
     slug = `${slugBase}-${n++}`
   }
+  const source = String(body.source || "image")
+  // Normalise free-form dashboard input (`github.com/org/repo`) into a real
+  // https URL so redeploys and the pipeline always see the same shape.
+  let repoUrl: string | null = body.repoUrl != null ? String(body.repoUrl) : null
+  if (source === "git" && repoUrl) {
+    const git = normalizeGitSource(repoUrl, String(body.branch || "main"))
+    if (!git) {
+      return new Response(
+        JSON.stringify({
+          error: `Not a usable git URL: "${repoUrl}". Use github.com/org/repo or a full https:// URL.`,
+        }),
+        { status: 400 }
+      )
+    }
+    repoUrl = `https://${git.host}/${git.owner}/${git.repo}`
+  }
   const project = await db.project.create({
     data: {
       name,
       slug,
-      source: String(body.source || "image"),
-      repoUrl: body.repoUrl ?? null,
+      source,
+      repoUrl,
       folderPath: body.folderPath ?? null,
       composePath: body.composePath ?? null,
       stack: String(body.stack || "dockerfile"),

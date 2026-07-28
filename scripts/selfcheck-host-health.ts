@@ -25,7 +25,15 @@ import {
   dumpCommandFor,
   backupExtension,
 } from "../src/lib/backup-format"
-import { redactSecretValue, normalizeCommitSha, REDACTED } from "../src/lib/sanitize-fields"
+import { redactSecretValue, normalizeCommitSha, redactSecretUrl, REDACTED } from "../src/lib/sanitize-fields"
+import {
+  normalizeGitSource,
+  detectStackFromFiles,
+  refineNodeStack,
+  findDockerfile,
+  generateDockerfile,
+  parseExposePort,
+} from "../src/lib/git-deploy"
 
 let n = 0
 const ok = (name: string) => console.log(`  ✓ ${name}`)
@@ -55,9 +63,20 @@ check("context canceled → daemon cause", () => {
 
 check("401 / Authentication failed → private/stale-token cause", () => {
   const d = diagnoseDeployError("fatal: could not read Username: Authentication failed for repo (401)")
-  assert.ok(d && /private or the token is stale/i.test(d.cause))
+  assert.ok(d && /Clone failed/i.test(d.cause) && /private|token|stale/i.test(d.cause))
 })
 
+check("Remote branch not found → branch cause", () => {
+  const d = diagnoseDeployError(
+    "warning: Could not find remote branch main to clone.\nfatal: Remote branch main not found in upstream origin"
+  )
+  assert.ok(d && /branch/i.test(d.cause))
+})
+
+check("missing Dockerfile → dockerfile cause", () => {
+  const d = diagnoseDeployError("failed to read dockerfile: open Dockerfile: no such file or directory")
+  assert.ok(d && /Dockerfile/i.test(d.cause))
+})
 check("missing dynamic yml → routing-config cause", () => {
   const d = diagnoseDeployError("open app-foo-bar-abc.yml: no such file or directory")
   assert.ok(d && /Routing config/.test(d.cause))
@@ -239,6 +258,25 @@ check("dumpCommandFor: every supported engine writes the target file", () => {
   }
 })
 
+check("dumpCommandFor: piped dumps enable pipefail so a failed dump isn't recorded as success", () => {
+  const row = { username: "slipway", password: "p@ssw0rd", dbName: "app" }
+  for (const kind of ["postgres", "mysql", "mariadb", "mongodb"]) {
+    const spec = dumpCommandFor(kind, row, "/backups/x.gz", 5432)
+    assert.ok(spec, `${kind} must be dumpable`)
+    // Without pipefail, `false | gzip` exits 0 and produces a valid archive.
+    assert.ok(
+      /set\s+-o\s+pipefail/.test(spec!.cmd),
+      `${kind} dump pipeline must set pipefail: ${spec!.cmd}`
+    )
+  }
+  // redis/valkey write the rdb directly — no pipe, so pipefail is unnecessary
+  for (const kind of ["redis", "valkey"]) {
+    const spec = dumpCommandFor(kind, row, "/backups/x.rdb", 6379)
+    assert.ok(spec)
+    assert.ok(!spec!.cmd.includes("|"), `${kind} must not pipe through gzip`)
+  }
+})
+
 check("dumpCommandFor: unsupported engines refuse instead of faking a dump", () => {
   const row = { username: "sa", password: "x", dbName: "d" }
   assert.equal(dumpCommandFor("mssql", row, "/backups/x", 1433), null)
@@ -266,6 +304,25 @@ check("redactSecretValue: matching is case-insensitive", () => {
   }
 })
 
+check("redactSecretValue: trailing .pass / :pass keys are redacted without false positives", () => {
+  assert.equal(redactSecretValue("smtp.pass", "x"), REDACTED)
+  assert.equal(redactSecretValue("server:1:pass", "x"), REDACTED)
+  assert.equal(redactSecretValue("compass", "keep"), "keep")
+  assert.equal(redactSecretValue("bypass", "keep"), "keep")
+})
+
+check("redactSecretUrl: strips userinfo, token query params, and webhook path secrets", () => {
+  assert.equal(
+    redactSecretUrl("https://user:secret@hooks.example/hooks/abc"),
+    "https://redacted:redacted@hooks.example/hooks/[redacted]"
+  )
+  assert.ok(redactSecretUrl("https://discord.com/api/webhooks/123/tokensecret").includes(REDACTED))
+  const withQuery = redactSecretUrl("https://example.com/hook?token=abc")
+  assert.ok(!withQuery.includes("token=abc"), `token value leaked: ${withQuery}`)
+  assert.ok(/token=/i.test(withQuery), `token param missing: ${withQuery}`)
+  assert.equal(redactSecretUrl("not a url"), REDACTED)
+})
+
 check("normalizeCommitSha: keeps real object ids, discards everything else", () => {
   assert.equal(normalizeCommitSha("a3f9c21"), "a3f9c21") // short
   assert.equal(normalizeCommitSha("A3F9C21"), "a3f9c21") // normalised to lower
@@ -281,6 +338,62 @@ check("normalizeCommitSha: returns empty rather than inventing a commit", () => 
   assert.equal(normalizeCommitSha("zzzzzzz"), "") // not hex
   assert.equal(normalizeCommitSha("main"), "")
   assert.equal(normalizeCommitSha("0".repeat(41)), "") // too long
+})
+
+// ── git-deploy: public repo URL normalisation + Dockerfile generation ───────
+check("normalizeGitSource: accepts bare github.com/org/repo and https forms", () => {
+  const a = normalizeGitSource("github.com/vercel/next.js", "canary")
+  assert.ok(a)
+  assert.equal(a!.cloneUrl, "https://github.com/vercel/next.js.git")
+  assert.equal(a!.dockerGitUrl, "https://github.com/vercel/next.js.git#canary")
+  assert.equal(a!.owner, "vercel")
+  assert.equal(a!.repo, "next.js")
+  assert.equal(a!.branch, "canary")
+
+  const b = normalizeGitSource("https://github.com/org/repo.git")
+  assert.equal(b!.cloneUrl, "https://github.com/org/repo.git")
+  assert.equal(b!.branch, "main")
+
+  const c = normalizeGitSource("git@github.com:org/repo.git", "develop")
+  assert.equal(c!.cloneUrl, "https://github.com/org/repo.git")
+  assert.equal(c!.branch, "develop")
+})
+
+check("normalizeGitSource: parses GitHub tree URLs into branch + subdir", () => {
+  const g = normalizeGitSource("https://github.com/org/repo/tree/feat/apps/web")
+  assert.ok(g)
+  assert.equal(g!.branch, "feat")
+  assert.equal(g!.subdir, "apps/web")
+  assert.equal(g!.dockerGitUrl, "https://github.com/org/repo.git#feat:apps/web")
+})
+
+check("normalizeGitSource: rejects empty / non-http schemes", () => {
+  assert.equal(normalizeGitSource(""), null)
+  assert.equal(normalizeGitSource("ftp://github.com/org/repo"), null)
+  assert.equal(normalizeGitSource("not a url !!!"), null)
+})
+
+check("detectStackFromFiles + refineNodeStack: Dockerfile wins, else package.json/next", () => {
+  assert.equal(detectStackFromFiles(["Dockerfile", "package.json"]), "dockerfile")
+  assert.equal(detectStackFromFiles(["package.json", "src"]), "node")
+  assert.equal(detectStackFromFiles(["requirements.txt"]), "python")
+  assert.equal(detectStackFromFiles(["index.html"]), "static")
+  assert.equal(refineNodeStack('{"dependencies":{"next":"15.0.0"}}'), "nextjs")
+  assert.equal(refineNodeStack('{"dependencies":{"express":"4.0.0"}}'), "node")
+  assert.equal(findDockerfile(["readme.md", "Dockerfile"]), "Dockerfile")
+  assert.equal(findDockerfile(["readme.md"]), null)
+})
+
+check("generateDockerfile: produces EXPOSE for node/next/static, refuses unknown", () => {
+  const node = generateDockerfile({ stack: "node", startCmd: "node server.js" })
+  assert.ok(node && /EXPOSE 3000/.test(node) && /node server.js/.test(node))
+  const next = generateDockerfile({ stack: "nextjs" })
+  assert.ok(next && /NEXT_TELEMETRY_DISABLED/.test(next))
+  const stat = generateDockerfile({ stack: "static" })
+  assert.ok(stat && /nginx/.test(stat))
+  assert.equal(generateDockerfile({ stack: "unknown" }), null)
+  assert.equal(generateDockerfile({ stack: "rust" }), null)
+  assert.equal(parseExposePort("FROM x\nEXPOSE 8080\nCMD y"), 8080)
 })
 
 console.log(`\n  ${n} checks passed ✓`)

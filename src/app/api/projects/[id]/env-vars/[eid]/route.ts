@@ -19,6 +19,21 @@ export const PUT = route(async (req, params) => {
     return new Response(JSON.stringify({ error: "Not found" }), { status: 404 })
   }
 
+  // ponytail: unmasking without a replacement value used to flip `masked` to
+  // false while keeping the stored secret, and serializeProject then returned
+  // that secret in plaintext on the next GET/PUT response. A deploy-scoped
+  // token could therefore harvest every masked env var with
+  // `PUT {"masked":false}`. Require a new value whenever secrecy is lifted.
+  if (body.masked === false && existing.masked && body.value === undefined) {
+    return new Response(
+      JSON.stringify({
+        error:
+          "Cannot unmask an env var without providing a new value — the stored secret is never returned over the API.",
+      }),
+      { status: 400 }
+    )
+  }
+
   const data = {
     ...(body.key !== undefined ? { key: String(body.key) } : {}),
     ...(body.value !== undefined ? { value: String(body.value) } : {}),

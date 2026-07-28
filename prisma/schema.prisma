@@ -323,7 +323,7 @@ model BackupRecord {
   id            String   @id @default(cuid())
   target        String
   targetKind    String   // database | volume | project
-  status        String   @default("running") // completed | running | failed | scheduled
+  status        String   @default("running") // completed | running | failed | scheduled | expired
   sizeMb        Int      @default(0)
   startedAt     DateTime @default(now())
   finishedAt    DateTime?

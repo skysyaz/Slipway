@@ -1,7 +1,7 @@
 import { route } from "@/lib/http"
 import { db } from "@/lib/db"
 import { NextResponse } from "next/server"
-import { redactSecretValue } from "@/lib/sanitize-fields"
+import { redactSecretValue, redactSecretUrl } from "@/lib/sanitize-fields"
 
 export const dynamic = "force-dynamic"
 
@@ -37,7 +37,10 @@ export const GET = route(async (_req, _params, _auth) => {
     servers,
     domains,
     registries,
-    webhooks,
+    // ponytail: webhook URLs often embed Discord/Slack secrets in the path;
+    // exporting them verbatim defeated the "no secrets" promise even after
+    // Setting values were redacted.
+    webhooks: webhooks.map((w) => ({ ...w, url: redactSecretUrl(w.url) })),
     integrations,
     backupSchedules: schedules,
     settings: Object.fromEntries(settings.map((s) => [s.key, redactSecretValue(s.key, s.value)])),

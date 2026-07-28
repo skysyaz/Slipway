@@ -9,11 +9,16 @@
  *
  * Scope (honest):
  *  - image source: pull + run (the common case, incl. the seeded whoami demo).
- *  - git/folder source: build via the `docker` CLI (`docker build`) when a
- *    Dockerfile is present, else throws → simulation fallback.
- *  - compose source: `docker compose up -d` via CLI.
+ *  - git source: shallow-clone the public repo into SLIPWAY_DATA_DIR/builds,
+ *    detect/generate a Dockerfile, then `tar | docker build -` so a
+ *    containerized Slipway can feed context to the host daemon over the
+ *    socket (a plain `docker build /container/path` would look for that path
+ *    on the HOST and fail with "lstat …/Dockerfile: no such file").
+ *  - folder source: same build path against a readable folderPath.
+ *  - compose source: `docker compose up -d` via CLI (compose file must be a
+ *    path the host docker daemon can read).
  *  - restart/stop/remove/scale: real container lifecycle.
- *  - backup: volume → tar via a helper container; DB → `docker exec` dump.
+ *  - backup: volume → tar via a helper container; DB → dump via helper.
  *
  * Single-node only (the manager host's Docker socket). Multi-node SSH join is
  * Phase 3 (src/lib/cluster.ts).
@@ -26,10 +31,21 @@ import { diagnoseDeployError, demuxToString } from "./host-health"
 import { normalizeCommitSha } from "./sanitize-fields"
 import {
   backupSlug,
+  shq,
   parseSizeMarker,
   dumpCommandFor,
   backupExtension,
 } from "./backup-format"
+import {
+  normalizeGitSource,
+  detectStackFromFiles,
+  refineNodeStack,
+  findDockerfile,
+  generateDockerfile,
+  parseExposePort,
+  defaultPortFor,
+  type DetectedStack,
+} from "./git-deploy"
 import type { DeployOptions } from "./simulate"
 
 const STAGES = [
@@ -304,6 +320,19 @@ export async function realDeploy(
   const image = project.dockerImage || opts.repoUrl || ""
   if (isImageSource && !image) throw new Error("No image to deploy")
 
+  // Resolve branch before creating the deployment row so the UI shows the real
+  // ref being built (redeploy used to always stamp "main").
+  let branch = opts.branch
+  if (!branch && source === "git") {
+    const last = await db.deployment.findFirst({
+      where: { projectId },
+      orderBy: { createdAt: "desc" },
+      select: { branch: true },
+    })
+    branch = last?.branch || "main"
+  }
+  branch = branch || "main"
+
   // Always record the deploy attempt — a failed deploy still shows in the list.
   const steps = STAGES.map((stage, i) => ({
     stage,
@@ -320,7 +349,7 @@ export async function realDeploy(
       projectId,
       commitSha: normalizeCommitSha((opts as { commitSha?: string }).commitSha),
       commitMessage: opts.commitMessage || "Manual deploy from dashboard",
-      branch: opts.branch || "main",
+      branch,
       author: actor,
       environment: opts.environment || project.environment,
       status: "building",
@@ -331,11 +360,26 @@ export async function realDeploy(
   await recordActivity("deploy", `triggered deployment of ${project.name}`, { projectId, actor })
 
   // Drive the real pipeline in the background; acquires Docker inside.
+  // ponytail: the Deploy button only POSTs `{ projectId }`. Request opts used
+  // to be the sole source of folderPath/repoUrl/composePath, so a re-deploy
+  // of a git/folder project built "." and a compose project used /dev/null.
+  // Prefer request overrides, fall back to the persisted project row.
+  const effectiveOpts: DeployOptions = {
+    ...opts,
+    source: opts.source || project.source,
+    repoUrl: opts.repoUrl || project.repoUrl || undefined,
+    folderPath: opts.folderPath || project.folderPath || undefined,
+    composePath: opts.composePath || project.composePath || undefined,
+    environment: opts.environment || project.environment,
+    buildCmd: opts.buildCmd || project.buildCmd || undefined,
+    startCmd: opts.startCmd || project.startCmd || undefined,
+    branch,
+  }
   runPipeline(deployment.id, projectId, project.slug, project.name, {
     isImageSource,
     image,
     source,
-    opts,
+    opts: effectiveOpts,
     actor,
   }).catch((e) => console.error("[docker-ops] deploy pipeline failed:", e))
 
@@ -385,160 +429,358 @@ async function runPipeline(
         data: { status: "failed", finishedAt: new Date(), log: log.slice(-1200) || null },
       })
     }
-    // checkout / detect / install — cheap for image source
-    await begin(1); await sleep(300); await finish(1)
-    await begin(2); await sleep(300); await finish(2)
-    if (!ctx.isImageSource) {
-      await begin(3); await sleep(400); await finish(3)
+    /** Mark a stage done without claiming real work ran. */
+    const skip = async (order: number, reason: string) => {
+      startedAt.set(order, Date.now())
+      await setStep(deploymentId, order, "building")
+      await db.deploymentStep.updateMany({
+        where: { deploymentId, order },
+        data: {
+          status: "healthy",
+          finishedAt: new Date(),
+          durationMs: 0,
+          log: reason.slice(0, 500),
+        },
+      })
     }
 
     let image = ctx.image
-    if (ctx.isImageSource) {
-      // image: pull (build step skipped)
-      await begin(5)
-      await pullImage(docker, image)
-      await finish(5)
-      await begin(6); await sleep(200); await finish(6) // image built = pulled
-    } else if (ctx.source === "compose") {
-      // compose: build via CLI
-      await begin(5)
-      await runCli([
-        "compose",
-        "-f",
-        String(ctx.opts.composePath || "/dev/null"),
-        "build",
-      ])
-      await finish(5)
-      image = "" // compose manages its own images
-    } else {
-      // git/folder: docker build
-      await begin(5)
-      // ponytail: tag the build with the DEPLOYMENT ID as well as :latest.
-      // :latest alone is overwritten by every subsequent build, so the image a
-      // past deployment released stopped existing the moment the next one ran —
-      // there was literally nothing for a rollback to return to. The immutable
-      // per-deployment tag is what makes realRollback() able to do real work.
-      const versionTag = `slipway-${projectSlug}:${deploymentId.slice(-8)}`
-      const latestTag = `slipway-${projectSlug}:latest`
-      const ctxPath = String(ctx.opts.folderPath || ctx.opts.repoUrl || ".")
-      try {
-        await runCli(["build", "-t", versionTag, "-t", latestTag, ctxPath])
-        image = versionTag
-        await finish(5)
-      } catch (be) {
-        // ponytail: persist the real build stderr (ENOSPC etc.) on the step + rethrow
-        const tail = ((be as Error & { stderr?: string }).stderr || (be as Error).message || "").trim()
-        await failStep(5, tail)
-        throw be
-      }
-    }
+    let appPort: number | null = null
+    let buildDir: string | null = null
 
-    // push step: no-op for local registry
-    await begin(7); await sleep(200); await finish(7)
+    try {
+      if (ctx.isImageSource) {
+        await skip(1, "skipped — image source has no repository to check out")
+        await skip(2, "skipped — image source")
+        await skip(3, "skipped — image already built upstream")
+        await skip(4, "skipped — image source")
+        await skip(5, "skipped — no test stage for image deploys")
+        await begin(6)
+        await pullImage(docker, image)
+        await finish(6)
+        await skip(7, "skipped — local Docker engine, no registry push")
+      } else if (ctx.source === "compose") {
+        const composeFile = String(ctx.opts.composePath || "")
+        if (!composeFile || composeFile === "/dev/null") {
+          await failStep(1, "No compose file path on this project.")
+          throw new Error(
+            "Compose deploy needs a composePath on the project (e.g. /path/to/docker-compose.yml on the host)."
+          )
+        }
+        await begin(1)
+        await runCli(["compose", "-f", composeFile, "config", "-q"])
+        await finish(1)
+        await skip(2, "skipped — compose file defines the stack")
+        await skip(3, "skipped — compose build installs deps")
+        await skip(4, "skipped — compose build handles compilation")
+        await skip(5, "skipped — no separate test stage")
+        await begin(6)
+        await runCli(["compose", "-f", composeFile, "build"])
+        await finish(6)
+        image = ""
+        await skip(7, "skipped — compose manages its own images")
+      } else if (ctx.source === "git" || (!ctx.source && ctx.opts.repoUrl)) {
+        // ── public git repo deploy ──────────────────────────────────────
+        const git = normalizeGitSource(
+          String(ctx.opts.repoUrl || ""),
+          String(ctx.opts.branch || "main"),
+          ""
+        )
+        if (!git) {
+          await failStep(
+            1,
+            `Not a usable git URL: "${ctx.opts.repoUrl || ""}". Use github.com/org/repo or a full https:// URL.`
+          )
+          throw new Error(
+            `Not a usable git URL: "${ctx.opts.repoUrl || ""}". Example: github.com/org/repo`
+          )
+        }
 
-    // release: run the container
-    await begin(8)
-    let containerId: string | null = null
-    if (ctx.source === "compose") {
-      try {
-        await runCli(["compose", "-f", String(ctx.opts.composePath || "/dev/null"), "up", "-d"])
-      } catch (ce) {
-        await failStep(8, ((ce as Error & { stderr?: string }).stderr || (ce as Error).message || "").trim())
-        throw ce
-      }
-    } else {
-      const name = containerName(projectSlug, "app")
-      // remove any existing container with the same name
-      try {
-        const old = docker.getContainer(name)
-        await old.remove({ force: true })
-      } catch {
-        /* ignore */
-      }
-      try {
-        // ponytail: apply the project's ACTUAL configuration. This used to
-        // create the container with `Env: []` and no resource limits, so env
-        // vars entered in the dashboard never reached the running app and the
-        // memory/CPU fields were decorative — they only took effect if the user
-        // later hit the separate "Apply to container" (reconcile) action, which
-        // did read them. Deploy and reconcile now build the container the same
-        // way; realReconcile() is the in-place variant of this block.
-        const cfg = await containerConfigFor(projectId)
-        const created = await docker.createContainer({
-          Image: image,
-          name,
-          Env: cfg.Env,
-          ...(cfg.Cmd ? { Cmd: cfg.Cmd } : {}),
-          HostConfig: {
-            RestartPolicy: { Name: "unless-stopped" },
-            PortBindings: {},
-            ...(cfg.Memory ? { Memory: cfg.Memory } : {}),
-            ...(cfg.NanoCpus ? { NanoCpus: cfg.NanoCpus } : {}),
+        // checkout
+        await begin(1)
+        buildDir = await clonePublicRepo(git.cloneUrl, git.branch, deploymentId)
+        const workDir = git.subdir ? `${buildDir}/${git.subdir}` : buildDir
+        const { access } = await import("node:fs/promises")
+        try {
+          await access(workDir)
+        } catch {
+          await failStep(1, `subdir "${git.subdir}" not found after clone`)
+          throw new Error(`Repository cloned, but subdir "${git.subdir}" does not exist.`)
+        }
+        const sha = await gitRevParse(buildDir)
+        if (sha) {
+          await db.deployment.update({
+            where: { id: deploymentId },
+            data: { commitSha: sha, branch: git.branch },
+          })
+        }
+        await finish(1)
+
+        // detect stack + ensure Dockerfile
+        await begin(2)
+        const files = await listCheckoutFiles(workDir)
+        let stack: DetectedStack = detectStackFromFiles(files)
+        if (stack === "node") {
+          const pkg = await readTextFile(`${workDir}/package.json`)
+          stack = refineNodeStack(pkg)
+        }
+        let dfName = findDockerfile(files)
+        let dfText = dfName ? (await readTextFile(`${workDir}/${dfName}`)) || "" : ""
+        if (!dfName) {
+          const generated = generateDockerfile({
+            stack,
+            buildCmd: ctx.opts.buildCmd,
+            startCmd: ctx.opts.startCmd,
+          })
+          if (!generated) {
+            await failStep(
+              2,
+              `No Dockerfile in the repo and Slipway cannot auto-generate one for stack "${stack}". Add a Dockerfile to the repository root.`
+            )
+            throw new Error(
+              `No Dockerfile found in ${git.owner}/${git.repo} and stack "${stack}" is not auto-buildable. Add a Dockerfile and redeploy.`
+            )
+          }
+          const { writeFile } = await import("node:fs/promises")
+          await writeFile(`${workDir}/Dockerfile`, generated, "utf8")
+          dfName = "Dockerfile"
+          dfText = generated
+          await db.deploymentStep.updateMany({
+            where: { deploymentId, order: 2 },
+            data: {
+              log: `Detected ${stack}; generated Dockerfile (repo had none).`,
+            },
+          })
+        }
+        appPort = parseExposePort(dfText) || defaultPortFor(stack)
+        await db.project.update({
+          where: { id: projectId },
+          data: {
+            stack,
+            stackLabel: stackLabelFor(stack),
+            repoUrl: `https://${git.host}/${git.owner}/${git.repo}`,
           },
         })
-        await created.start()
-        containerId = created.id
-      } catch (re) {
-        // ponytail: create/start fails with ENOSPC when the docker FS is full —
-        // persist the real error tail on the release step (Bug 3).
-        await failStep(8, ((re as Error).message || "").trim())
-        throw re
-      }
-    }
-    await finish(8)
+        await finish(2)
 
-    // verify: container is running
-    await begin(9)
-    if (containerId) {
-      const c = docker.getContainer(containerId)
-      const info = await c.inspect()
-      const running = info.State?.Running === true
-      if (!running) {
-        // ponytail: capture why it exited (crash-loop / ENOSPC init) for the UI.
-        const tail = await c
-          .logs({ stdout: true, stderr: true, follow: false })
-          .then((b) => demuxToString(b).slice(-1200))
-          .catch(() => "")
-        await failStep(9, tail)
-        throw new Error("container exited after start")
+        await skip(3, "skipped — dependency install happens inside the image build")
+        await skip(4, "skipped — application build happens inside the image build")
+        await skip(5, "skipped — Slipway does not run a test stage yet")
+
+        // build image — stream context via stdin so a containerized Slipway
+        // can build without the daemon seeing the container's filesystem paths
+        await begin(6)
+        const versionTag = `slipway-${projectSlug}:${deploymentId.slice(-8)}`
+        const latestTag = `slipway-${projectSlug}:latest`
+        try {
+          await dockerBuildFromDir(workDir, dfName, [versionTag, latestTag])
+          image = versionTag
+          await finish(6)
+        } catch (be) {
+          const tail = ((be as Error & { stderr?: string }).stderr || (be as Error).message || "").trim()
+          await failStep(6, tail)
+          throw be
+        }
+        await skip(7, "skipped — local Docker engine, no registry push")
+      } else if (ctx.source === "folder" || ctx.opts.folderPath) {
+        const folder = String(ctx.opts.folderPath || "")
+        if (!folder) {
+          await failStep(1, "No folderPath on this project.")
+          throw new Error("Folder deploy needs a folderPath that exists on the Slipway host/container.")
+        }
+        await begin(1)
+        const { access } = await import("node:fs/promises")
+        try {
+          await access(folder)
+        } catch {
+          await failStep(1, `folder "${folder}" is not readable from Slipway`)
+          throw new Error(
+            `Folder "${folder}" is not readable. Inside the Slipway container only paths under the data volume (or a host bind-mount) work.`
+          )
+        }
+        await finish(1)
+
+        await begin(2)
+        const files = await listCheckoutFiles(folder)
+        let stack: DetectedStack = detectStackFromFiles(files)
+        if (stack === "node") {
+          stack = refineNodeStack(await readTextFile(`${folder}/package.json`))
+        }
+        let dfName = findDockerfile(files)
+        let dfText = dfName ? (await readTextFile(`${folder}/${dfName}`)) || "" : ""
+        if (!dfName) {
+          const generated = generateDockerfile({
+            stack,
+            buildCmd: ctx.opts.buildCmd,
+            startCmd: ctx.opts.startCmd,
+          })
+          if (!generated) {
+            await failStep(2, `No Dockerfile in ${folder} and stack "${stack}" is not auto-buildable.`)
+            throw new Error(`No Dockerfile in ${folder}. Add one or use a supported stack.`)
+          }
+          const { writeFile } = await import("node:fs/promises")
+          await writeFile(`${folder}/Dockerfile`, generated, "utf8")
+          dfName = "Dockerfile"
+          dfText = generated
+        }
+        appPort = parseExposePort(dfText) || defaultPortFor(stack)
+        await finish(2)
+
+        await skip(3, "skipped — dependency install happens inside the image build")
+        await skip(4, "skipped — application build happens inside the image build")
+        await skip(5, "skipped — Slipway does not run a test stage yet")
+
+        await begin(6)
+        const versionTag = `slipway-${projectSlug}:${deploymentId.slice(-8)}`
+        const latestTag = `slipway-${projectSlug}:latest`
+        try {
+          await dockerBuildFromDir(folder, dfName, [versionTag, latestTag])
+          image = versionTag
+          await finish(6)
+        } catch (be) {
+          const tail = ((be as Error & { stderr?: string }).stderr || (be as Error).message || "").trim()
+          await failStep(6, tail)
+          throw be
+        }
+        await skip(7, "skipped — local Docker engine, no registry push")
+      } else {
+        await failStep(
+          1,
+          `Nothing to deploy — source="${ctx.source || ""}" has no repoUrl/folderPath/image.`
+        )
+        throw new Error(
+          `Project has source "${ctx.source || "unknown"}" but no repo URL, folder path, or image to deploy.`
+        )
       }
+
+      // release: run the container
+      await begin(8)
+      let containerId: string | null = null
+      if (ctx.source === "compose") {
+        try {
+          await runCli(["compose", "-f", String(ctx.opts.composePath), "up", "-d"])
+        } catch (ce) {
+          await failStep(8, ((ce as Error & { stderr?: string }).stderr || (ce as Error).message || "").trim())
+          throw ce
+        }
+      } else {
+        const name = containerName(projectSlug, "app")
+        try {
+          const old = docker.getContainer(name)
+          await old.remove({ force: true })
+        } catch {
+          /* ignore */
+        }
+        try {
+          const cfg = await containerConfigFor(projectId)
+          const exposedPort = appPort || 3000
+          const hostPort = await pickFreePort(docker, exposedPort)
+          const created = await docker.createContainer({
+            Image: image,
+            name,
+            Env: cfg.Env,
+            ...(cfg.Cmd ? { Cmd: cfg.Cmd } : {}),
+            ExposedPorts: { [`${exposedPort}/tcp`]: {} },
+            HostConfig: {
+              RestartPolicy: { Name: "unless-stopped" },
+              PortBindings: {
+                [`${exposedPort}/tcp`]: [{ HostPort: String(hostPort) }],
+              },
+              ...(cfg.Memory ? { Memory: cfg.Memory } : {}),
+              ...(cfg.NanoCpus ? { NanoCpus: cfg.NanoCpus } : {}),
+            },
+          })
+          await created.start()
+          containerId = created.id
+          const publicHost =
+            process.env.SLIPWAY_PUBLIC_HOST?.trim() || "localhost"
+          const url = `http://${publicHost}:${hostPort}`
+          await db.project.update({
+            where: { id: projectId },
+            data: { url },
+          })
+          // Ensure there is at least one app service row reflecting the live port
+          const appServices = await db.service.count({ where: { projectId, kind: "app" } })
+          if (appServices === 0) {
+            await db.service.create({
+              data: {
+                projectId,
+                name: "app",
+                kind: "app",
+                status: "running",
+                image: image || "",
+                port: hostPort,
+                replicas: 1,
+                memoryMb: 512,
+                cpuMilli: 400,
+                dockerContainerId: containerId,
+              },
+            })
+          } else {
+            await db.service.updateMany({
+              where: { projectId, kind: "app" },
+              data: { port: hostPort },
+            })
+          }
+        } catch (re) {
+          await failStep(8, ((re as Error).message || "").trim())
+          throw re
+        }
+      }
+      await finish(8)
+
+      // verify: container is running
+      await begin(9)
+      if (containerId) {
+        const c = docker.getContainer(containerId)
+        const info = await c.inspect()
+        const running = info.State?.Running === true
+        if (!running) {
+          const tail = await c
+            .logs({ stdout: true, stderr: true, follow: false })
+            .then((b) => demuxToString(b).slice(-1200))
+            .catch(() => "")
+          await failStep(9, tail)
+          throw new Error("container exited after start")
+        }
+        await db.project.update({
+          where: { id: projectId },
+          data: { dockerContainerId: containerId, dockerImage: image || undefined },
+        })
+        await db.service.updateMany({
+          where: { projectId },
+          data: { dockerContainerId: containerId, status: "running" },
+        })
+      }
+      await finish(9)
+
+      // live
+      await begin(10)
+      await finish(10)
+
+      await db.deployment.update({
+        where: { id: deploymentId },
+        data: {
+          status: "healthy",
+          finishedAt: new Date(),
+          durationMs: Date.now() - pipelineStart,
+          image: image || null,
+        },
+      })
       await db.project.update({
         where: { id: projectId },
-        data: { dockerContainerId: containerId, dockerImage: image || undefined },
+        data: { status: "running", lastDeployedAt: new Date(), monthlyDeploys: { increment: 1 } },
       })
-      await db.service.updateMany({
-        where: { projectId },
-        data: { dockerContainerId: containerId, status: "running" },
-      })
+      await emit(
+        "deploy.success",
+        "deploy",
+        `deployed ${projectName} to ${ctx.opts.environment || "production"}`,
+        { title: "Deployment complete", body: `${projectName} is live via Docker.`, level: "success", kind: "deploy" },
+        { projectId, actor: ctx.actor }
+      )
+    } finally {
+      if (buildDir) await rmBuildDir(buildDir)
     }
-    await finish(9)
-
-    // live
-    await begin(10); await sleep(300); await finish(10)
-
-    // ponytail: record the REAL wall-clock duration. This wrote `durationMs: 0`
-    // before, so every successful deploy reported "0ms" in the UI.
-    await db.deployment.update({
-      where: { id: deploymentId },
-      data: {
-        status: "healthy",
-        finishedAt: new Date(),
-        durationMs: Date.now() - pipelineStart,
-        // what this deployment actually released — the anchor for rollback
-        image: image || null,
-      },
-    })
-    await db.project.update({
-      where: { id: projectId },
-      data: { status: "running", lastDeployedAt: new Date(), monthlyDeploys: { increment: 1 } },
-    })
-    await emit(
-      "deploy.success",
-      "deploy",
-      `deployed ${projectName} to ${ctx.opts.environment || "production"}`,
-      { title: "Deployment complete", body: `${projectName} is live via Docker.`, level: "success", kind: "deploy" },
-      { projectId, actor: ctx.actor }
-    )
   } catch (e) {
     // ponytail: diagnose the REAL cause from the captured stderr/error and
     // persist it on the deployment (Bug 3) — the UI shows this instead of a
@@ -583,6 +825,205 @@ async function runCli(args: string[]): Promise<{ stdout: string; stderr: string 
       } else {
         resolve({ stdout: stdout || "", stderr: stderr || "" })
       }
+    })
+  })
+}
+
+async function runCmd(
+  command: string,
+  args: string[],
+  opts: { cwd?: string; env?: NodeJS.ProcessEnv } = {}
+): Promise<{ stdout: string; stderr: string }> {
+  const { execFile } = await import("node:child_process")
+  return new Promise((resolve, reject) => {
+    execFile(
+      command,
+      args,
+      { maxBuffer: 8 * 1024 * 1024, cwd: opts.cwd, env: { ...process.env, ...opts.env } },
+      (err, stdout, stderr) => {
+        if (err) {
+          const tail = (stderr || err.message || "").trim().slice(-1200)
+          const e = new Error(`${command} ${args.join(" ")} failed: ${tail || err.message}`)
+          ;(e as Error & { stderr?: string }).stderr = tail
+          reject(e)
+        } else {
+          resolve({ stdout: stdout || "", stderr: stderr || "" })
+        }
+      }
+    )
+  })
+}
+
+function buildsRoot(): string {
+  const base = process.env.SLIPWAY_DATA_DIR?.trim() || "/tmp"
+  return `${base.replace(/\/+$/, "")}/builds`
+}
+
+/**
+ * Shallow-clone a public repo into the data dir. Public HTTPS only — private
+ * repos need credentials Slipway does not yet store for git clone.
+ */
+async function clonePublicRepo(cloneUrl: string, branch: string, deploymentId: string): Promise<string> {
+  const { mkdir } = await import("node:fs/promises")
+  const dir = `${buildsRoot()}/${deploymentId}`
+  await rmBuildDir(dir)
+  await mkdir(dir, { recursive: true })
+  // ponytail: clone into a fresh directory per deployment. Reusing a shared
+  // checkout raced concurrent deploys and left dirty trees that made the next
+  // build pick up someone else's commit.
+  try {
+    await runCmd("git", [
+      "clone",
+      "--depth",
+      "1",
+      "--branch",
+      branch,
+      "--single-branch",
+      cloneUrl,
+      dir,
+    ])
+  } catch (e) {
+    // default branch might not be what the UI sent (`main` vs `master`) —
+    // retry without --branch so git uses the remote HEAD.
+    const msg = ((e as Error & { stderr?: string }).stderr || (e as Error).message || "").toLowerCase()
+    if (/not found|could not find remote|remote branch|does not exist|fatal:/.test(msg)) {
+      await rmBuildDir(dir)
+      await mkdir(dir, { recursive: true })
+      try {
+        await runCmd("git", ["clone", "--depth", "1", "--single-branch", cloneUrl, dir])
+      } catch (e2) {
+        // surface the ORIGINAL branch error when the unscoped clone also fails
+        // (private/missing repo), otherwise the HEAD-clone error
+        throw e2
+      }
+    } else {
+      throw e
+    }
+  }
+  return dir
+}
+
+async function gitRevParse(repoDir: string): Promise<string> {
+  try {
+    const { stdout } = await runCmd("git", ["rev-parse", "HEAD"], { cwd: repoDir })
+    return stdout.trim().toLowerCase()
+  } catch {
+    return ""
+  }
+}
+
+async function listCheckoutFiles(dir: string): Promise<string[]> {
+  const { readdir } = await import("node:fs/promises")
+  try {
+    const entries = await readdir(dir, { withFileTypes: true })
+    // top-level only is enough for stack detection (Dockerfile, package.json, …)
+    return entries.map((e) => e.name)
+  } catch {
+    return []
+  }
+}
+
+async function readTextFile(path: string): Promise<string | null> {
+  const { readFile } = await import("node:fs/promises")
+  try {
+    return await readFile(path, "utf8")
+  } catch {
+    return null
+  }
+}
+
+async function rmBuildDir(dir: string): Promise<void> {
+  const { rm } = await import("node:fs/promises")
+  await rm(dir, { recursive: true, force: true }).catch(() => {})
+}
+
+function stackLabelFor(stack: DetectedStack): string {
+  switch (stack) {
+    case "nextjs":
+      return "Next.js"
+    case "node":
+      return "Node.js"
+    case "python":
+      return "Python"
+    case "go":
+      return "Go"
+    case "rust":
+      return "Rust"
+    case "static":
+      return "Static"
+    case "compose":
+      return "Docker Compose"
+    case "dockerfile":
+      return "Dockerfile"
+    default:
+      return stack
+  }
+}
+
+/**
+ * Build an image from a directory that lives INSIDE the Slipway container.
+ *
+ * ponytail: `docker build /container/path` asks the *host* daemon for that
+ * path, which does not exist on the host when Slipway runs in a container with
+ * only the socket mounted. Streaming a tar of the directory on stdin
+ * (`docker build -`) sends the context to the daemon over the API — the only
+ * reliable way to build from a checkout that lives in the manager container.
+ */
+async function dockerBuildFromDir(
+  contextDir: string,
+  dockerfileName: string,
+  tags: string[]
+): Promise<void> {
+  const { spawn } = await import("node:child_process")
+  const args = ["build", "-f", dockerfileName]
+  for (const t of tags) {
+    args.push("-t", t)
+  }
+  args.push("-")
+
+  await new Promise<void>((resolve, reject) => {
+    const tar = spawn("tar", ["-C", contextDir, "-cf", "-", "."], { stdio: ["ignore", "pipe", "pipe"] })
+    const build = spawn("docker", args, { stdio: ["pipe", "pipe", "pipe"] })
+    let stderr = ""
+    tar.stdout.pipe(build.stdin)
+    tar.stderr.on("data", (d: Buffer) => {
+      stderr += d.toString()
+    })
+    build.stderr.on("data", (d: Buffer) => {
+      stderr += d.toString()
+    })
+    build.stdout.on("data", () => {
+      /* drain */
+    })
+    let tarCode: number | null = null
+    let buildCode: number | null = null
+    const maybeDone = () => {
+      if (tarCode === null || buildCode === null) return
+      if (tarCode !== 0) {
+        const e = new Error(`tar context failed (exit ${tarCode}): ${stderr.trim().slice(-800)}`)
+        ;(e as Error & { stderr?: string }).stderr = stderr.trim().slice(-1200)
+        reject(e)
+        return
+      }
+      if (buildCode !== 0) {
+        const e = new Error(`docker build failed (exit ${buildCode}): ${stderr.trim().slice(-800)}`)
+        ;(e as Error & { stderr?: string }).stderr = stderr.trim().slice(-1200)
+        reject(e)
+        return
+      }
+      resolve()
+    }
+    tar.on("error", (err) => reject(err))
+    build.on("error", (err) => reject(err))
+    tar.on("close", (code) => {
+      tarCode = code ?? 1
+      // if tar fails early, close the build stdin so it doesn't hang
+      if (tarCode !== 0) build.stdin.destroy()
+      maybeDone()
+    })
+    build.on("close", (code) => {
+      buildCode = code ?? 1
+      maybeDone()
     })
   })
 }
@@ -1036,7 +1477,7 @@ export async function realRollback(deploymentId: string, actor = "you"): Promise
       return false
     }
 
-    let created: Docker.Container
+    let created: Docker.Container | null = null
     try {
       created = await docker.createContainer({
         Image: target.image,
@@ -1049,6 +1490,20 @@ export async function realRollback(deploymentId: string, actor = "you"): Promise
       })
       await created.start()
     } catch (ce) {
+      // ponytail: if createContainer succeeded but start() failed, the failed
+      // container still owns `name`. restorePrevious() then tries to rename the
+      // saved container back onto that name and hits a collision — leaving both
+      // the broken new container and the known-good one renamed aside. Force-
+      // remove the failed create first so the restore rename can succeed.
+      if (created) {
+        await created.remove({ force: true }).catch(() => {})
+        created = null
+      } else if (name) {
+        await docker
+          .getContainer(name)
+          .remove({ force: true })
+          .catch(() => {})
+      }
       const restored = await restorePrevious()
       await failStep(1, (ce as Error).message)
       throw new Error(
@@ -1238,25 +1693,41 @@ export async function realSetDatabaseCredentials(
   // here would recreate the "revealed credentials don't work" bug.
   const currentAdmin = row.password ?? ""
 
-  // Escape a SQL string literal by doubling the quote. Valid for postgres,
-  // mssql, and mysql/mariadb alike (MySQL accepts '' as an escaped quote
-  // regardless of NO_BACKSLASH_ESCAPES, which backslash escaping does not).
-  const lit = (v: string) => v.replace(/'/g, "''")
+  // Escape a SQL string literal. Postgres / MSSQL only need quote doubling.
+  // MySQL/MariaDB default to backslash escapes too — a password containing `\'`
+  // would otherwise terminate the literal and inject SQL. Escape backslashes
+  // first, then quotes.
+  const litPg = (v: string) => v.replace(/'/g, "''")
+  const litMysql = (v: string) => v.replace(/\\/g, "\\\\").replace(/'/g, "''")
 
   let cmd: string[]
   switch (row.kind) {
     case "postgres":
-      cmd = ["psql", "-U", username, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", `ALTER USER "${username}" WITH PASSWORD '${lit(newPass)}';`]
+      cmd = ["psql", "-U", username, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", `ALTER USER "${username}" WITH PASSWORD '${litPg(newPass)}';`]
       break
     case "mysql":
-    case "mariadb":
-      cmd = ["mysql", "-u", "root", `-p${currentAdmin}`, "-e", `ALTER USER '${username}'@'%' IDENTIFIED BY '${lit(newPass)}';`]
+    case "mariadb": {
+      // ponytail: provision sets the SAME password on root and the app user
+      // (MYSQL_ROOT_PASSWORD / MYSQL_PASSWORD). Rotation used to ALTER only the
+      // app user, then store newPass as the row password — so the next backup
+      // (mysqldump -u root with MYSQL_PWD=row.password) and the next rotation
+      // both authenticated root with the wrong secret. Keep them in lockstep.
+      const p = litMysql(newPass)
+      const statements = [
+        `ALTER USER 'root'@'localhost' IDENTIFIED BY '${p}'`,
+        `ALTER USER 'root'@'%' IDENTIFIED BY '${p}'`,
+        username ? `ALTER USER '${username.replace(/'/g, "''")}'@'%' IDENTIFIED BY '${p}'` : "",
+      ]
+        .filter(Boolean)
+        .join("; ")
+      cmd = ["mysql", "-u", "root", `-p${currentAdmin}`, "-e", statements]
       break
+    }
     case "mongodb":
       cmd = ["mongosh", "--quiet", "-u", "root", "-p", currentAdmin, "--authenticationDatabase", "admin", "--eval", `db.changeUserPassword(${JSON.stringify(username)},${JSON.stringify(newPass)})`]
       break
     case "mssql":
-      cmd = ["/opt/mssql-tools18/bin/sqlcmd", "-S", "localhost", "-U", "sa", "-P", currentAdmin, "-C", "-Q", `ALTER LOGIN [${username}] WITH PASSWORD = '${lit(newPass)}';`]
+      cmd = ["/opt/mssql-tools18/bin/sqlcmd", "-S", "localhost", "-U", "sa", "-P", currentAdmin, "-C", "-Q", `ALTER LOGIN [${username}] WITH PASSWORD = '${litPg(newPass)}';`]
       break
     case "redis":
     case "valkey":
@@ -1773,7 +2244,7 @@ export async function realBackup(
     // Retention is part of taking a backup: without pruning, the backup volume
     // grows until it fills the host disk — the failure mode host-health exists
     // to diagnose.
-    await pruneBackups(docker, retentionDays).catch((e) =>
+    await pruneBackups(docker, retentionDays, targetKind, target).catch((e) =>
       console.error("[docker-ops] backup prune failed:", (e as Error).message)
     )
   } catch (e) {
@@ -1811,17 +2282,48 @@ async function defaultRetentionFor(target: string, schedule?: string): Promise<n
 }
 
 /**
- * Delete archives older than `retentionDays` from the backup volume, and mark
- * the corresponding records expired. Best-effort: a prune failure must never
- * fail the backup that just succeeded.
+ * Delete archives older than `retentionDays` from the backup volume for THIS
+ * target only, and mark the corresponding records expired. Best-effort: a
+ * prune failure must never fail the backup that just succeeded.
+ *
+ * ponytail: pruning used to `find /backups -mtime +N -delete` across the
+ * entire shared volume, so a one-day schedule for database A deleted every
+ * other target's 30-day archives too. Scope by the filename prefix we write
+ * (`volume-<slug>-…` / `db-<slug>-…`).
  */
-async function pruneBackups(docker: Docker, retentionDays: number): Promise<void> {
+async function pruneBackups(
+  docker: Docker,
+  retentionDays: number,
+  targetKind: string,
+  target: string
+): Promise<void> {
   if (!Number.isFinite(retentionDays) || retentionDays <= 0) return
+  const prefix =
+    targetKind === "volume"
+      ? `volume-${backupSlug(target)}-`
+      : `db-${backupSlug(target)}-`
+  const days = Math.floor(retentionDays)
   await runHelper(docker, {
     Image: "alpine:latest",
-    Cmd: ["sh", "-c", `find /backups -type f -mtime +${Math.floor(retentionDays)} -delete 2>/dev/null; echo pruned`],
+    Cmd: [
+      "sh",
+      "-c",
+      `find /backups -type f -name ${shq(prefix + "*")} -mtime +${days} -delete 2>/dev/null; echo pruned`,
+    ],
     Binds: [`${BACKUP_VOLUME}:/backups`],
   })
+  const cutoff = new Date(Date.now() - days * 86_400_000)
+  await db.backupRecord
+    .updateMany({
+      where: {
+        target,
+        targetKind,
+        status: "completed",
+        finishedAt: { lt: cutoff },
+      },
+      data: { status: "expired" },
+    })
+    .catch(() => {})
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2015,8 +2517,15 @@ export async function realProvisionDatabase(
       Env: env,
       HostConfig: {
         RestartPolicy: { Name: "unless-stopped" },
+        // ponytail: without HostIp Docker binds 0.0.0.0, publishing every
+        // managed database on all host interfaces — reachable from the public
+        // internet whenever the host firewall allows it. Default to loopback;
+        // operators who need remote access set SLIPWAY_PUBLIC_HOST / open the
+        // port deliberately (credentials reveal already documents that path).
         PortBindings: {
-          [`${engine.internalPort}/tcp`]: [{ HostPort: String(hostPort) }],
+          [`${engine.internalPort}/tcp`]: [
+            { HostIp: "127.0.0.1", HostPort: String(hostPort) },
+          ],
         },
         Binds: [`${volumeName}:${engine.dataDir}`],
       },
