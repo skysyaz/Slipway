@@ -26,6 +26,7 @@ import { diagnoseDeployError, demuxToString } from "./host-health"
 import { normalizeCommitSha } from "./sanitize-fields"
 import {
   backupSlug,
+  shq,
   parseSizeMarker,
   dumpCommandFor,
   backupExtension,
@@ -331,11 +332,25 @@ export async function realDeploy(
   await recordActivity("deploy", `triggered deployment of ${project.name}`, { projectId, actor })
 
   // Drive the real pipeline in the background; acquires Docker inside.
+  // ponytail: the Deploy button only POSTs `{ projectId }`. Request opts used
+  // to be the sole source of folderPath/repoUrl/composePath, so a re-deploy
+  // of a git/folder project built "." and a compose project used /dev/null.
+  // Prefer request overrides, fall back to the persisted project row.
+  const effectiveOpts: DeployOptions = {
+    ...opts,
+    source: opts.source || project.source,
+    repoUrl: opts.repoUrl || project.repoUrl || undefined,
+    folderPath: opts.folderPath || project.folderPath || undefined,
+    composePath: opts.composePath || project.composePath || undefined,
+    environment: opts.environment || project.environment,
+    buildCmd: opts.buildCmd || project.buildCmd || undefined,
+    startCmd: opts.startCmd || project.startCmd || undefined,
+  }
   runPipeline(deployment.id, projectId, project.slug, project.name, {
     isImageSource,
     image,
     source,
-    opts,
+    opts: effectiveOpts,
     actor,
   }).catch((e) => console.error("[docker-ops] deploy pipeline failed:", e))
 
@@ -1036,7 +1051,7 @@ export async function realRollback(deploymentId: string, actor = "you"): Promise
       return false
     }
 
-    let created: Docker.Container
+    let created: Docker.Container | null = null
     try {
       created = await docker.createContainer({
         Image: target.image,
@@ -1049,6 +1064,20 @@ export async function realRollback(deploymentId: string, actor = "you"): Promise
       })
       await created.start()
     } catch (ce) {
+      // ponytail: if createContainer succeeded but start() failed, the failed
+      // container still owns `name`. restorePrevious() then tries to rename the
+      // saved container back onto that name and hits a collision — leaving both
+      // the broken new container and the known-good one renamed aside. Force-
+      // remove the failed create first so the restore rename can succeed.
+      if (created) {
+        await created.remove({ force: true }).catch(() => {})
+        created = null
+      } else if (name) {
+        await docker
+          .getContainer(name)
+          .remove({ force: true })
+          .catch(() => {})
+      }
       const restored = await restorePrevious()
       await failStep(1, (ce as Error).message)
       throw new Error(
@@ -1238,25 +1267,41 @@ export async function realSetDatabaseCredentials(
   // here would recreate the "revealed credentials don't work" bug.
   const currentAdmin = row.password ?? ""
 
-  // Escape a SQL string literal by doubling the quote. Valid for postgres,
-  // mssql, and mysql/mariadb alike (MySQL accepts '' as an escaped quote
-  // regardless of NO_BACKSLASH_ESCAPES, which backslash escaping does not).
-  const lit = (v: string) => v.replace(/'/g, "''")
+  // Escape a SQL string literal. Postgres / MSSQL only need quote doubling.
+  // MySQL/MariaDB default to backslash escapes too — a password containing `\'`
+  // would otherwise terminate the literal and inject SQL. Escape backslashes
+  // first, then quotes.
+  const litPg = (v: string) => v.replace(/'/g, "''")
+  const litMysql = (v: string) => v.replace(/\\/g, "\\\\").replace(/'/g, "''")
 
   let cmd: string[]
   switch (row.kind) {
     case "postgres":
-      cmd = ["psql", "-U", username, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", `ALTER USER "${username}" WITH PASSWORD '${lit(newPass)}';`]
+      cmd = ["psql", "-U", username, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", `ALTER USER "${username}" WITH PASSWORD '${litPg(newPass)}';`]
       break
     case "mysql":
-    case "mariadb":
-      cmd = ["mysql", "-u", "root", `-p${currentAdmin}`, "-e", `ALTER USER '${username}'@'%' IDENTIFIED BY '${lit(newPass)}';`]
+    case "mariadb": {
+      // ponytail: provision sets the SAME password on root and the app user
+      // (MYSQL_ROOT_PASSWORD / MYSQL_PASSWORD). Rotation used to ALTER only the
+      // app user, then store newPass as the row password — so the next backup
+      // (mysqldump -u root with MYSQL_PWD=row.password) and the next rotation
+      // both authenticated root with the wrong secret. Keep them in lockstep.
+      const p = litMysql(newPass)
+      const statements = [
+        `ALTER USER 'root'@'localhost' IDENTIFIED BY '${p}'`,
+        `ALTER USER 'root'@'%' IDENTIFIED BY '${p}'`,
+        username ? `ALTER USER '${username.replace(/'/g, "''")}'@'%' IDENTIFIED BY '${p}'` : "",
+      ]
+        .filter(Boolean)
+        .join("; ")
+      cmd = ["mysql", "-u", "root", `-p${currentAdmin}`, "-e", statements]
       break
+    }
     case "mongodb":
       cmd = ["mongosh", "--quiet", "-u", "root", "-p", currentAdmin, "--authenticationDatabase", "admin", "--eval", `db.changeUserPassword(${JSON.stringify(username)},${JSON.stringify(newPass)})`]
       break
     case "mssql":
-      cmd = ["/opt/mssql-tools18/bin/sqlcmd", "-S", "localhost", "-U", "sa", "-P", currentAdmin, "-C", "-Q", `ALTER LOGIN [${username}] WITH PASSWORD = '${lit(newPass)}';`]
+      cmd = ["/opt/mssql-tools18/bin/sqlcmd", "-S", "localhost", "-U", "sa", "-P", currentAdmin, "-C", "-Q", `ALTER LOGIN [${username}] WITH PASSWORD = '${litPg(newPass)}';`]
       break
     case "redis":
     case "valkey":
@@ -1773,7 +1818,7 @@ export async function realBackup(
     // Retention is part of taking a backup: without pruning, the backup volume
     // grows until it fills the host disk — the failure mode host-health exists
     // to diagnose.
-    await pruneBackups(docker, retentionDays).catch((e) =>
+    await pruneBackups(docker, retentionDays, targetKind, target).catch((e) =>
       console.error("[docker-ops] backup prune failed:", (e as Error).message)
     )
   } catch (e) {
@@ -1811,17 +1856,48 @@ async function defaultRetentionFor(target: string, schedule?: string): Promise<n
 }
 
 /**
- * Delete archives older than `retentionDays` from the backup volume, and mark
- * the corresponding records expired. Best-effort: a prune failure must never
- * fail the backup that just succeeded.
+ * Delete archives older than `retentionDays` from the backup volume for THIS
+ * target only, and mark the corresponding records expired. Best-effort: a
+ * prune failure must never fail the backup that just succeeded.
+ *
+ * ponytail: pruning used to `find /backups -mtime +N -delete` across the
+ * entire shared volume, so a one-day schedule for database A deleted every
+ * other target's 30-day archives too. Scope by the filename prefix we write
+ * (`volume-<slug>-…` / `db-<slug>-…`).
  */
-async function pruneBackups(docker: Docker, retentionDays: number): Promise<void> {
+async function pruneBackups(
+  docker: Docker,
+  retentionDays: number,
+  targetKind: string,
+  target: string
+): Promise<void> {
   if (!Number.isFinite(retentionDays) || retentionDays <= 0) return
+  const prefix =
+    targetKind === "volume"
+      ? `volume-${backupSlug(target)}-`
+      : `db-${backupSlug(target)}-`
+  const days = Math.floor(retentionDays)
   await runHelper(docker, {
     Image: "alpine:latest",
-    Cmd: ["sh", "-c", `find /backups -type f -mtime +${Math.floor(retentionDays)} -delete 2>/dev/null; echo pruned`],
+    Cmd: [
+      "sh",
+      "-c",
+      `find /backups -type f -name ${shq(prefix + "*")} -mtime +${days} -delete 2>/dev/null; echo pruned`,
+    ],
     Binds: [`${BACKUP_VOLUME}:/backups`],
   })
+  const cutoff = new Date(Date.now() - days * 86_400_000)
+  await db.backupRecord
+    .updateMany({
+      where: {
+        target,
+        targetKind,
+        status: "completed",
+        finishedAt: { lt: cutoff },
+      },
+      data: { status: "expired" },
+    })
+    .catch(() => {})
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2015,8 +2091,15 @@ export async function realProvisionDatabase(
       Env: env,
       HostConfig: {
         RestartPolicy: { Name: "unless-stopped" },
+        // ponytail: without HostIp Docker binds 0.0.0.0, publishing every
+        // managed database on all host interfaces — reachable from the public
+        // internet whenever the host firewall allows it. Default to loopback;
+        // operators who need remote access set SLIPWAY_PUBLIC_HOST / open the
+        // port deliberately (credentials reveal already documents that path).
         PortBindings: {
-          [`${engine.internalPort}/tcp`]: [{ HostPort: String(hostPort) }],
+          [`${engine.internalPort}/tcp`]: [
+            { HostIp: "127.0.0.1", HostPort: String(hostPort) },
+          ],
         },
         Binds: [`${volumeName}:${engine.dataDir}`],
       },

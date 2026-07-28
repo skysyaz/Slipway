@@ -25,7 +25,7 @@ import {
   dumpCommandFor,
   backupExtension,
 } from "../src/lib/backup-format"
-import { redactSecretValue, normalizeCommitSha, REDACTED } from "../src/lib/sanitize-fields"
+import { redactSecretValue, normalizeCommitSha, redactSecretUrl, REDACTED } from "../src/lib/sanitize-fields"
 
 let n = 0
 const ok = (name: string) => console.log(`  ✓ ${name}`)
@@ -239,6 +239,25 @@ check("dumpCommandFor: every supported engine writes the target file", () => {
   }
 })
 
+check("dumpCommandFor: piped dumps enable pipefail so a failed dump isn't recorded as success", () => {
+  const row = { username: "slipway", password: "p@ssw0rd", dbName: "app" }
+  for (const kind of ["postgres", "mysql", "mariadb", "mongodb"]) {
+    const spec = dumpCommandFor(kind, row, "/backups/x.gz", 5432)
+    assert.ok(spec, `${kind} must be dumpable`)
+    // Without pipefail, `false | gzip` exits 0 and produces a valid archive.
+    assert.ok(
+      /set\s+-o\s+pipefail/.test(spec!.cmd),
+      `${kind} dump pipeline must set pipefail: ${spec!.cmd}`
+    )
+  }
+  // redis/valkey write the rdb directly — no pipe, so pipefail is unnecessary
+  for (const kind of ["redis", "valkey"]) {
+    const spec = dumpCommandFor(kind, row, "/backups/x.rdb", 6379)
+    assert.ok(spec)
+    assert.ok(!spec!.cmd.includes("|"), `${kind} must not pipe through gzip`)
+  }
+})
+
 check("dumpCommandFor: unsupported engines refuse instead of faking a dump", () => {
   const row = { username: "sa", password: "x", dbName: "d" }
   assert.equal(dumpCommandFor("mssql", row, "/backups/x", 1433), null)
@@ -264,6 +283,25 @@ check("redactSecretValue: matching is case-insensitive", () => {
   for (const k of ["PASSWORD", "Secret", "ApiKey", "TOKEN", "Private"]) {
     assert.equal(redactSecretValue(k, "leak"), REDACTED, `${k} must be redacted`)
   }
+})
+
+check("redactSecretValue: trailing .pass / :pass keys are redacted without false positives", () => {
+  assert.equal(redactSecretValue("smtp.pass", "x"), REDACTED)
+  assert.equal(redactSecretValue("server:1:pass", "x"), REDACTED)
+  assert.equal(redactSecretValue("compass", "keep"), "keep")
+  assert.equal(redactSecretValue("bypass", "keep"), "keep")
+})
+
+check("redactSecretUrl: strips userinfo, token query params, and webhook path secrets", () => {
+  assert.equal(
+    redactSecretUrl("https://user:secret@hooks.example/hooks/abc"),
+    "https://redacted:redacted@hooks.example/hooks/[redacted]"
+  )
+  assert.ok(redactSecretUrl("https://discord.com/api/webhooks/123/tokensecret").includes(REDACTED))
+  const withQuery = redactSecretUrl("https://example.com/hook?token=abc")
+  assert.ok(!withQuery.includes("token=abc"), `token value leaked: ${withQuery}`)
+  assert.ok(/token=/i.test(withQuery), `token param missing: ${withQuery}`)
+  assert.equal(redactSecretUrl("not a url"), REDACTED)
 })
 
 check("normalizeCommitSha: keeps real object ids, discards everything else", () => {

@@ -60,21 +60,26 @@ export function dumpCommandFor(
   const pass = row.password || ""
   const dbName = row.dbName || ""
   const port = String(internalPort)
+  // ponytail: every piped dump used to be `dump | gzip > file` under plain `sh
+  // -c`. POSIX sh reports gzip's exit status, so a failed dump still produced a
+  // valid non-empty .gz (gzip happily compresses EOF) and the backup was
+  // recorded "completed". `set -o pipefail` makes the pipeline fail when the
+  // dump tool fails — alpine/busybox ash and bash both honour it.
   switch (kind) {
     case "postgres":
       return {
-        cmd: `pg_dump -h 127.0.0.1 -p ${port} -U ${shq(user)} -d ${shq(dbName)} | gzip -c > ${shq(file)}`,
+        cmd: `set -o pipefail; pg_dump -h 127.0.0.1 -p ${port} -U ${shq(user)} -d ${shq(dbName)} | gzip -c > ${shq(file)}`,
         env: [`PGPASSWORD=${pass}`],
       }
     case "mysql":
     case "mariadb":
       return {
-        cmd: `mysqldump -h 127.0.0.1 -P ${port} --protocol=tcp -u root --all-databases | gzip -c > ${shq(file)}`,
+        cmd: `set -o pipefail; mysqldump -h 127.0.0.1 -P ${port} --protocol=tcp -u root --all-databases | gzip -c > ${shq(file)}`,
         env: [`MYSQL_PWD=${pass}`],
       }
     case "mongodb":
       return {
-        cmd: `mongodump --host 127.0.0.1 --port ${port} -u ${shq(user)} -p "$MONGO_PW" --authenticationDatabase admin --archive | gzip -c > ${shq(file)}`,
+        cmd: `set -o pipefail; mongodump --host 127.0.0.1 --port ${port} -u ${shq(user)} -p "$MONGO_PW" --authenticationDatabase admin --archive | gzip -c > ${shq(file)}`,
         env: [`MONGO_PW=${pass}`],
       }
     case "redis":

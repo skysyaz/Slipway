@@ -57,12 +57,24 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
 }
 
 function useSubmit() {
+  const { toast } = useToast()
   const [submitting, setSubmitting] = React.useState(false)
-  const run = async <T,>(fn: () => T | Promise<T>): Promise<T> => {
+  // ponytail: callers used to `run(() => { void api.post(...); toast(success) })`
+  // — the promise was discarded, so the dialog closed and toasted success
+  // before the request finished (or failed). Always await the callback and
+  // surface failures instead of claiming success.
+  const run = async <T,>(fn: () => T | Promise<T>): Promise<T | undefined> => {
     setSubmitting(true)
     try {
       await new Promise((r) => setTimeout(r, 400))
       return await fn()
+    } catch (e) {
+      toast({
+        title: 'Request failed',
+        description: e instanceof Error ? e.message : String(e),
+        variant: 'destructive',
+      })
+      return undefined
     } finally {
       setSubmitting(false)
     }
@@ -246,10 +258,7 @@ export function NewDatabaseDialog() {
                 {creds.dbName && <CredRow label="Database" value={creds.dbName} mono />}
                 <CredRow label="Host" value={`${creds.host || 'localhost'}:${creds.port}`} mono />
                 <p className="text-[10px] text-muted-foreground leading-snug">
-                  You can reveal the password again any time from the database&apos;s ⋯ menu → Show credentials.
-                </p>
-                <p className="text-[10px] text-amber-600 leading-snug">
-                  From outside the server, use the server&apos;s public IP (not {creds.host || 'localhost'}) and open TCP port {creds.port} in your firewall. See ⋯ → Show credentials for the external connection string.
+                  Bound on 127.0.0.1 — reachable from this host. You can reveal the password again any time from the database&apos;s ⋯ menu → Show credentials.
                 </p>
               </div>
               <Button onClick={() => setOpen(false)} className="gap-2">Done</Button>
@@ -409,8 +418,8 @@ export function NewVolumeDialog() {
             <div className="flex items-center gap-2.5">
               <ShieldCheck size={15} className="text-emerald-500" />
               <div>
-                <div className="text-[12px] font-medium">Encrypt at rest</div>
-                <div className="text-[11px] text-muted-foreground">AES-256-GCM</div>
+                <div className="text-[12px] font-medium">Mark as encrypted</div>
+                <div className="text-[11px] text-muted-foreground">Intent only — Docker local volumes are not encrypted by Slipway</div>
               </div>
             </div>
             <Switch checked={encrypted} onCheckedChange={setEncrypted} />
@@ -421,9 +430,10 @@ export function NewVolumeDialog() {
           <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
           <Button
             disabled={!name || submitting}
-            onClick={() => run(() => {
-              addVolume({ name, mountPath: mount, sizeGb: parseInt(size), type, server, projectId: projectId || undefined, encrypted })
-              toast({ title: 'Volume created', description: `${name} mounted at ${mount}.` })
+            onClick={() => void run(async () => {
+              await addVolume({ name, mountPath: mount, sizeGb: parseInt(size), type, server, projectId: projectId || undefined, encrypted })
+              toast({ title: 'Volume created', description: `${name} created${encrypted ? ' (encryption is recorded as intent — Docker local volumes are not encrypted by Slipway).' : ''}.` })
+              setOpen(false)
             })}
             className="gap-2"
           >
@@ -520,9 +530,10 @@ export function NewDomainDialog() {
           <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
           <Button
             disabled={!hostname || !projectId || submitting}
-            onClick={() => run(() => {
-              addDomain(projectId, hostname, type, ssl)
-              toast({ title: 'Domain added', description: `${hostname} routed to project. SSL provisioning started.` })
+            onClick={() => void run(async () => {
+              await addDomain(projectId, hostname, type, ssl)
+              toast({ title: 'Domain added', description: `${hostname} recorded for the project. Routing/SSL require a configured reverse proxy.` })
+              setOpen(false)
             })}
             className="gap-2"
           >
@@ -600,9 +611,10 @@ export function NewBackupDialog() {
           <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
           <Button
             disabled={!target || submitting}
-            onClick={() => run(() => {
-              runBackup(target, targetKind)
+            onClick={() => void run(async () => {
+              await runBackup(target, targetKind)
               toast({ title: 'Backup started', description: `${target} backup is running.` })
+              setOpen(false)
             })}
             className="gap-2"
           >
@@ -699,9 +711,10 @@ export function NewBackupScheduleDialog() {
           <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
           <Button
             disabled={!target || submitting}
-            onClick={() => run(() => {
-              addBackupSchedule(target, schedule, parseInt(retention))
+            onClick={() => void run(async () => {
+              await addBackupSchedule(target, schedule, parseInt(retention))
               toast({ title: 'Schedule created', description: `${target} will back up on schedule.` })
+              setOpen(false)
             })}
             className="gap-2"
           >
@@ -766,9 +779,9 @@ export function NewPreviewDialog() {
           <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
           <Button
             disabled={!projectId || !branch || submitting}
-            onClick={() => run(() => {
+            onClick={() => void run(async () => {
               const project = projects.find((p) => p.id === projectId)
-              void createAndDeploy({ existingProjectId: projectId, branch, environment: 'preview' })
+              await createAndDeploy({ existingProjectId: projectId, branch, environment: 'preview' })
               toast({ title: 'Preview started', description: `${project?.name} preview for ${branch} is building.` })
               setOpen(false)
             })}
@@ -854,7 +867,7 @@ export function NewServerDialog() {
           <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
           <Button
             disabled={!ip || !name || submitting}
-            onClick={() => run(() => {
+            onClick={() => void run(async () => {
               // ponytail: record ONLY what the operator actually told us. This
               // used to invent a hostname (`<name>.slipway.run`), an OS
               // ("Ubuntu 24.04 LTS"), 4 cores, 16 GB RAM, a 200 GB disk and a
@@ -862,11 +875,12 @@ export function NewServerDialog() {
               // all of which the Servers list then displayed as fact. The real
               // OS and Docker version are discovered by the SSH join probe;
               // until that runs the row stays honestly blank.
-              addServer({ name, hostname: ip, ip, role, sshUser: user, sshKeyId: sshKey })
+              await addServer({ name, hostname: ip, ip, role, sshUser: user, sshKeyId: sshKey })
               toast({
                 title: 'Server added',
                 description: `${name} is recorded as ${role} but not connected yet — use Join to reach it over SSH.`,
               })
+              setOpen(false)
             })}
             className="gap-2"
           >
@@ -936,8 +950,8 @@ export function NewSshKeyDialog() {
           <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
           <Button
             disabled={!name || !publicKey || submitting}
-            onClick={() => run(() => {
-              void api.post('/api/ssh-keys', { name, publicKey, scope })
+            onClick={() => void run(async () => {
+              await api.post('/api/ssh-keys', { name, publicKey, scope })
               setOpen(false)
               toast({ title: 'SSH key added', description: `${name} can now be used for ${scope} access.` })
             })}
@@ -1011,8 +1025,8 @@ export function NewRegistryDialog() {
           <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
           <Button
             disabled={!name || !url || submitting}
-            onClick={() => run(() => {
-              void api.post('/api/registries', { name, url, auth, token: auth === 'token' ? token : undefined, password: auth === 'basic' ? token : undefined })
+            onClick={() => void run(async () => {
+              await api.post('/api/registries', { name, url, auth, token: auth === 'token' ? token : undefined, password: auth === 'basic' ? token : undefined })
               setOpen(false)
               toast({ title: 'Registry added', description: `${name} connected.` })
             })}
@@ -1088,8 +1102,8 @@ export function NewWebhookDialog() {
           <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
           <Button
             disabled={!url || events.length === 0 || submitting}
-            onClick={() => run(() => {
-              void api.post('/api/webhooks', { url, events })
+            onClick={() => void run(async () => {
+              await api.post('/api/webhooks', { url, events })
               setOpen(false)
               toast({ title: 'Webhook added', description: `Subscribed to ${events.length} event${events.length === 1 ? '' : 's'}.` })
             })}
@@ -1176,7 +1190,7 @@ export function NewTokenDialog() {
           {!generated && (
             <Button
               disabled={!name || submitting}
-              onClick={() => run(async () => {
+              onClick={() => void run(async () => {
                 const res = await api.post<{ token: string }>('/api/tokens', { name, scope })
                 setGenerated(res.token)
               })}
@@ -1246,8 +1260,8 @@ export function AddServiceDialog({ projectId }: { projectId: string }) {
           <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
           <Button
             disabled={!name || !image || submitting}
-            onClick={() => run(() => {
-              void addService(projectId, { name, kind, image, replicas: 1, memoryMb: 256, cpuMilli: 200 })
+            onClick={() => void run(async () => {
+              await addService(projectId, { name, kind, image, replicas: 1, memoryMb: 256, cpuMilli: 200 })
               setOpen(false)
               toast({ title: 'Service added', description: `${name} is now scheduled.` })
             })}

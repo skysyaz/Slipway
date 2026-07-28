@@ -7,6 +7,11 @@ export const dynamic = "force-dynamic"
 // Reveal the stored credentials so the user can always recover the password.
 // Auth-gated via route(). The password is only ever returned here, never in the
 // list/detail serializer.
+//
+// ponytail: default GET privilege is `read`, which meant a read-scoped API
+// token could dump every database password and connection string. Secret
+// reveal is an operator action — require deploy (sessions still pass through
+// the session bypass in route()).
 export const GET = route(async (_req, params) => {
   const row = await db.databaseInstance.findUnique({ where: { id: params.id } })
   if (!row) return new Response(JSON.stringify({ error: "not found" }), { status: 404 })
@@ -34,11 +39,11 @@ export const GET = route(async (_req, params) => {
       ? `${row.kind}://${authPart}<container>:${row.internalPort}${dbSegment} (not published on a host port)`
       : undefined
 
-  // ponytail: the published port is bound to 0.0.0.0 on the host, so it's
-  // reachable from outside via the host's public address — but the connection
-  // string above uses `host` (localhost), which only works from the host itself.
-  // If the operator set SLIPWAY_PUBLIC_HOST, also surface an external URI and a
-  // firewall reminder. Without that env we can't guess the public address.
+  // ponytail: the published port is bound to 127.0.0.1 on the host (see
+  // realProvisionDatabase), so the connection string using `host` (localhost)
+  // is the honest one for host-local clients. SLIPWAY_PUBLIC_HOST is only a
+  // hint for operators who deliberately re-bind / firewall-open the port —
+  // Slipway itself no longer publishes on 0.0.0.0 by default.
   const publicHost = process.env.SLIPWAY_PUBLIC_HOST?.trim() || ""
   const externalConnectionString =
     published && publicHost && publicHost !== host ? buildUri(publicHost) : undefined
@@ -50,8 +55,8 @@ export const GET = route(async (_req, params) => {
     : row.status === "external"
       ? "This database was imported from an existing container — Slipway does not know its password. Use the credentials you set when you created it."
       : externalConnectionString
-        ? `Internal (host): use the connection string above. From outside the server: use the external string and open TCP port ${port} in your firewall (e.g. Azure NSG / ufw).`
-        : `The port is published on the host. From outside the server, replace "${host}" with the server's public IP and open TCP port ${port} in your firewall.`
+        ? `Bound on 127.0.0.1:${port} on the host. From outside the server you must re-bind or tunnel; Slipway does not publish managed databases on 0.0.0.0 by default.`
+        : `Bound on 127.0.0.1:${port} — reachable from the host, not from the public internet.`
 
   return {
     username: user || undefined,
@@ -63,7 +68,7 @@ export const GET = route(async (_req, params) => {
     externalConnectionString,
     note: externalNote,
   }
-})
+}, { action: "deploy" })
 
 // Set / rotate the credentials on a Slipway-managed database. `docker exec`s
 // the engine CLI (see realSetDatabaseCredentials). External/imported DBs and

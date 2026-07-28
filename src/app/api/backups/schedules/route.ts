@@ -1,6 +1,7 @@
 import { route } from "@/lib/http"
 import { db } from "@/lib/db"
 import { recordActivity, emit } from "@/lib/notify"
+import * as cron from "node-cron"
 
 export const dynamic = "force-dynamic"
 
@@ -22,6 +23,16 @@ export const POST = route(async (req, _params, auth) => {
   const target = String(body.target || "")
   const schedule = String(body.schedule || "")
   if (!target || !schedule) return new Response(JSON.stringify({ error: "target and schedule required" }), { status: 400 })
+  // ponytail: the API used to accept any string and toast success, while the
+  // scheduler later logged and ignored invalid expressions — so a typo looked
+  // like a working schedule that never fired. Refuse up front with the same
+  // validator node-cron uses.
+  if (!cron.validate(schedule)) {
+    return new Response(
+      JSON.stringify({ error: `"${schedule}" is not a valid cron expression` }),
+      { status: 400 }
+    )
+  }
   const sched = await db.backupSchedule.create({
     data: {
       target,

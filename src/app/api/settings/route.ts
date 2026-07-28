@@ -2,13 +2,25 @@ import { route } from "@/lib/http"
 import { db } from "@/lib/db"
 import bcrypt from "bcryptjs"
 import { APP_VERSION } from "@/config/app"
+import { redactSecretValue } from "@/lib/sanitize-fields"
+import { roleAllows } from "@/lib/authz"
 
 export const dynamic = "force-dynamic"
 
 export const GET = route(async (_req, _params, auth) => {
   const rows = await db.setting.findMany()
   const settings: Record<string, string> = {}
-  for (const r of rows) settings[r.key] = r.value
+  // ponytail: Settings stores per-server SSH passwords (`server:<id>:password`).
+  // A read-scoped API token used to receive every Setting value verbatim via
+  // this GET. Redact credential-ish keys unless the principal is admin
+  // (sessions carry role "user"/"admin" from the User row — treat interactive
+  // sessions as full operators per the deliberate session bypass, so only
+  // redact for non-admin tokens).
+  const redact =
+    auth.via === "token" && !roleAllows(auth.role, "admin")
+  for (const r of rows) {
+    settings[r.key] = redact ? redactSecretValue(r.key, r.value) : r.value
+  }
   const user = auth.userId ? await db.user.findUnique({ where: { id: auth.userId } }) : null
 
   // ponytail: bug 2 — read the displayed version from the single source of
