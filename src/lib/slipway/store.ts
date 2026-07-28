@@ -267,6 +267,8 @@ function writeEnvParam(env: Environment | 'all') {
   window.history.pushState({ slipwayEnv: env }, '', url.href)
 }
 
+let hydrateInFlight: Promise<void> | null = null
+
 export const useSlipway = create<SlipwayState>((set, get) => {
   const initial = parseHash()
   // Sync external hash changes (browser Back/Forward, or a pasted shareable
@@ -379,10 +381,21 @@ export const useSlipway = create<SlipwayState>((set, get) => {
   },
 
   hydrate: async () => {
-    if (get().hydrating || get().hydrated) return
+    // R9: single-flight. The old `if (hydrating||hydrated) return` guard is not
+    // atomic — two concurrent callers both read hydrating=false and both fetch.
+    // Store the in-flight promise and hand it to concurrent callers instead.
+    if (get().hydrated) return
+    if (hydrateInFlight) return hydrateInFlight
     set({ hydrating: true })
-    await get().refetchAll()
-    set({ hydrating: false, hydrated: true })
+    hydrateInFlight = (async () => {
+      try {
+        await get().refetchAll()
+        set({ hydrating: false, hydrated: true })
+      } finally {
+        hydrateInFlight = null
+      }
+    })()
+    return hydrateInFlight
   },
 
   refetchAll: async () => {

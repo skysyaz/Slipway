@@ -2,6 +2,7 @@ import { NextResponse } from "next/server"
 import type { NextRequest } from "next/server"
 import { requireAuth, can, type AuthContext } from "./server-auth"
 import { defaultActionFor, type AuthAction } from "./authz"
+import { randomBytes } from "node:crypto"
 
 export type { AuthAction }
 
@@ -56,9 +57,16 @@ export function route(
       return NextResponse.json(result)
     } catch (e) {
       if (e instanceof Response) return e // 401 from requireAuth
-      const msg = e instanceof Error ? e.message : "Internal server error"
-      console.error("[api] error:", msg)
-      return NextResponse.json({ error: msg }, { status: 500 })
+      // R7: never return internal error text (paths, SQL, stack, Prisma detail)
+      // to clients — it leaks the schema + filesystem. Return a fixed message
+      // plus a correlation id; log the real error server-side under that id.
+      const requestId = randomBytes(8).toString("hex")
+      const detail = e instanceof Error ? `${e.message}\n${e.stack ?? ""}` : String(e)
+      console.error(`[api] request ${requestId} error:`, detail)
+      return NextResponse.json(
+        { error: "Internal server error", requestId },
+        { status: 500 }
+      )
     }
   }
 }

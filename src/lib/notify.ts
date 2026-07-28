@@ -7,6 +7,7 @@
  * thrown to the caller.
  */
 import { db } from "./db"
+import { validateWebhookUrl } from "./security"
 
 export type EventKind =
   | "deploy.success"
@@ -132,11 +133,23 @@ export async function dispatchExternal(
 }
 
 async function postJson(url: string, body: unknown): Promise<void> {
+  // R5 SSRF guard: user-controlled webhook/integration URLs are fetched
+  // server-side, so a malicious value could reach cloud metadata
+  // (169.254.169.254), loopback services, or internal hosts. Allow http/https
+  // only and block private/loopback/link-local/metadata BEFORE connecting.
+  const check = validateWebhookUrl(url)
+  if (!check.ok) {
+    throw new Error(`blocked webhook URL: ${check.reason}`)
+  }
   const res = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(10000),
+    // Do not follow redirects silently — a 302 to a private host would defeat
+    // the check above. Treat redirects as a delivery failure instead of
+    // re-validating each hop (no DNS-rebinding window).
+    redirect: "error",
   })
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
 }

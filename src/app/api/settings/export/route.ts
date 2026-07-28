@@ -2,6 +2,7 @@ import { route } from "@/lib/http"
 import { db } from "@/lib/db"
 import { NextResponse } from "next/server"
 import { redactSecretValue, redactSecretUrl } from "@/lib/sanitize-fields"
+import { scrub } from "@/lib/security"
 
 export const dynamic = "force-dynamic"
 
@@ -36,12 +37,15 @@ export const GET = route(async (_req, _params, _auth) => {
     volumes,
     servers,
     domains,
-    registries,
+    // R6: registry `auth` holds base64 credentials — scrub it (and any other
+    // credential-ish field) before export. The dedicated redactSecretValue
+    // covers Settings keys; scrub() covers structured rows like registries.
+    registries: scrub(registries) as typeof registries,
     // ponytail: webhook URLs often embed Discord/Slack secrets in the path;
     // exporting them verbatim defeated the "no secrets" promise even after
     // Setting values were redacted.
     webhooks: webhooks.map((w) => ({ ...w, url: redactSecretUrl(w.url) })),
-    integrations,
+    integrations: scrub(integrations) as typeof integrations,
     backupSchedules: schedules,
     settings: Object.fromEntries(settings.map((s) => [s.key, redactSecretValue(s.key, s.value)])),
   }
