@@ -37,15 +37,21 @@ export function ProjectsView() {
   const [query, setQuery] = React.useState('')
   const [view, setView] = React.useState<'grid' | 'list'>('grid')
 
-  const filtered = projects.filter((p) => {
-    if (env !== 'all' && p.environment !== env) return false
-    if (!query) return true
-    return (
-      p.name.toLowerCase().includes(query.toLowerCase()) ||
-      p.stackLabel.toLowerCase().includes(query.toLowerCase()) ||
-      p.slug.includes(query.toLowerCase())
-    )
-  })
+  // ponytail: memoize the filtered list — without this the whole list re-filters
+  // on every 5s poll (new projects array ref) even when env/query are unchanged.
+  const filtered = React.useMemo(
+    () =>
+      projects.filter((p) => {
+        if (env !== 'all' && p.environment !== env) return false
+        if (!query) return true
+        return (
+          p.name.toLowerCase().includes(query.toLowerCase()) ||
+          p.stackLabel.toLowerCase().includes(query.toLowerCase()) ||
+          p.slug.includes(query.toLowerCase())
+        )
+      }),
+    [projects, env, query],
+  )
 
   return (
     <div className="space-y-5">

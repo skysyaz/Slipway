@@ -124,6 +124,51 @@ async function getHostDisk(docker: Docker): Promise<{ totalBytes: number; usedBy
   return r
 }
 
+// ponytail: per-volume used bytes via `du`. `docker system df` reports
+// Volumes[].Size, but on many Docker installs that field is 0/empty — so the
+// storage dashboard showed "0 MB used" for every volume. Fallback: spawn ONE
+// throwaway alpine with every volume bind-mounted read-only at /vol/<name> and
+// `du -sb` each. One container for all volumes, cached 60s (the dashboard polls
+// every few s; we don't want to fork a container per poll). Ceiling: du walks
+// the whole volume each TTL tick — fine for self-host scale; if a volume holds
+// millions of inodes, raise VOL_SIZE_TTL or switch to a daemon sidecar.
+let volSizeCache: { t: number; sizes: Map<string, number> } | null = null
+const VOL_SIZE_TTL = 60_000
+
+async function getVolumeSizes(docker: Docker, names: string[]): Promise<Map<string, number>> {
+  const out = new Map<string, number>()
+  if (names.length === 0) return out
+  if (volSizeCache && Date.now() - volSizeCache.t < VOL_SIZE_TTL) return volSizeCache.sizes
+  try {
+    const binds = names.map((n) => `${n}:/vol/${n}:ro`)
+    const make = () =>
+      docker.createContainer({
+        Image: "alpine:latest",
+        Cmd: ["sh", "-c", "for d in /vol/*; do [ -d \"$d\" ] && du -sb \"$d\" 2>/dev/null; done"],
+        Tty: true,
+        HostConfig: { Binds: binds, AutoRemove: true },
+      })
+    let c: Docker.Container
+    try {
+      c = await make()
+    } catch {
+      await pullImage(docker, "alpine:latest")
+      c = await make()
+    }
+    await c.start()
+    const logs = await c.logs({ stdout: true, stderr: false, follow: false })
+    const text = logs.toString("utf8")
+    for (const line of text.split("\n")) {
+      const m = line.match(/^(\d+)\s+\/vol\/(.+)/)
+      if (m) out.set(m[2], Number(m[1]))
+    }
+  } catch {
+    /* du not supported / unavailable — leave df values */
+  }
+  if (out.size) volSizeCache = { t: Date.now(), sizes: out }
+  return out
+}
+
 export async function getStorageSnapshot(): Promise<{
   volumes: Map<string, { usedBytes: number; mountpoint: string }>
   mounts: Map<string, string[]>
@@ -136,7 +181,7 @@ export async function getStorageSnapshot(): Promise<{
   const docker = await getDocker().catch(() => null)
   if (!docker) return { volumes: new Map(), mounts: new Map(), host: null }
 
-  // per-volume real used bytes + host mountpoint
+  // per-volume real used bytes + host mountpoint (from `docker system df`)
   const volumes = new Map<string, { usedBytes: number; mountpoint: string }>()
   try {
     const df = (await docker.df()) as { Volumes?: { Name?: string; Size?: number; Mountpoint?: string }[] }
@@ -146,6 +191,18 @@ export async function getStorageSnapshot(): Promise<{
     }
   } catch {
     /* df not supported / unavailable */
+  }
+
+  // ponytail: df reports 0 on many Docker installs — fill the gaps with a real
+  // `du` (one alpine, all volumes ro). Only the volumes df couldn't size are
+  // overwritten, so where df IS accurate we keep it.
+  const unsized = [...volumes.keys()].filter((n) => !volumes.get(n)!.usedBytes)
+  if (unsized.length) {
+    const du = await getVolumeSizes(docker, unsized)
+    for (const n of unsized) {
+      const bytes = du.get(n)
+      if (bytes) volumes.set(n, { usedBytes: bytes, mountpoint: volumes.get(n)!.mountpoint })
+    }
   }
 
   // in-container mount destinations per volume (from container Mounts)

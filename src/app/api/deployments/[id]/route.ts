@@ -10,5 +10,5 @@ export const GET = route(async (_req, params) => {
     include: { steps: true, project: { select: { name: true } } },
   })
   if (!d) return new Response(JSON.stringify({ error: "Not found" }), { status: 404 })
-  return serializeDeployment(d, d.project.name)
+  return serializeDeployment(d, d.project?.name)
 })

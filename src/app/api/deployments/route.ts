@@ -16,7 +16,7 @@ export const GET = route(async (req) => {
   })
   const projects = await db.project.findMany({ select: { id: true, name: true } })
   const nameById = new Map(projects.map((p) => [p.id, p.name]))
-  return deployments.map((d) => serializeDeployment(d, nameById.get(d.projectId)))
+  return deployments.map((d) => serializeDeployment(d, d.projectId ? nameById.get(d.projectId) : undefined))
 })
 
 export const POST = route(async (req, _params, auth) => {

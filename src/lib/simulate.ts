@@ -32,6 +32,7 @@ export async function simulateRollback(
 ): Promise<string> {
   const dep = await db.deployment.findUnique({ where: { id: deploymentId } })
   if (!dep) throw new Error("Deployment not found")
+  if (!dep.projectId) throw new Error("Deployment has no project")
   const project = await db.project.findUnique({ where: { id: dep.projectId } })
   if (!project) throw new Error("Project not found")
 

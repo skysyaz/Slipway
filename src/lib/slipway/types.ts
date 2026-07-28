@@ -58,8 +58,9 @@ export interface PipelineStep {
 
 export interface Deployment {
   id: string
-  projectId: string
+  projectId?: string
   projectName: string
+  kind?: 'project' | 'database'
   commitSha: string
   commitMessage: string
   branch: string
@@ -171,6 +172,7 @@ export interface DatabaseInstance {
   dbName?: string
   internalPort?: number
   dockerContainerId?: string
+  environment?: Environment
   createdAt: string
 }
 

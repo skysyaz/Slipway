@@ -62,6 +62,9 @@ export const POST = route(async (req, _params, auth) => {
       maxConnections: body.maxConnections || MAX_CONN[kind] || 200,
       backupsEnabled: body.backupsEnabled ?? true,
       region: String(body.region || "local"),
+      // ponytail: tag the DB with the active environment so it filters under the
+      // Staging/Preview toggle and shows as that env in Deployments (bug 6).
+      environment: body.environment ? String(body.environment) : null,
     },
   })
 
@@ -79,6 +82,28 @@ export const POST = route(async (req, _params, auth) => {
   }
 
   const provisioned = await db.databaseInstance.findUnique({ where: { id: created.id } })
+  // ponytail: record the provision as a Deployment (kind=database) so it shows
+  // in the Deployments view — a shared DB (no project) still logs here thanks to
+  // the nullable projectId. No pipeline steps (a DB provision has no stages).
+  try {
+    const finishedAt = new Date()
+    await db.deployment.create({
+      data: {
+        projectId: provisioned?.projectId || null,
+        kind: "database",
+        commitMessage: `provisioned ${kind} database "${name}"`,
+        commitSha: "",
+        branch: "database",
+        author: auth.username,
+        environment: provisioned?.environment || "production",
+        status: "healthy",
+        finishedAt,
+        durationMs: Math.max(0, finishedAt.getTime() - created.createdAt.getTime()),
+      },
+    })
+  } catch {
+    /* best-effort: don't fail the provision over a log row */
+  }
   await emit(
     "database.created",
     "database",

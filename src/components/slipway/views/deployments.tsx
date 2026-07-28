@@ -1,7 +1,7 @@
 'use client'
 
 import * as React from 'react'
-import { Rocket, History, Filter, Search, Check, AlertTriangle, Clock, MoreHorizontal } from 'lucide-react'
+import { Rocket, History, Filter, Search, Check, AlertTriangle, Clock, MoreHorizontal, Database } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
@@ -82,6 +82,7 @@ export function DeploymentsView() {
       <div className="rounded-xl border border-border bg-card overflow-hidden">
         {filtered.map((d, i) => {
           const project = projects.find((p) => p.id === d.projectId)
+          const isDb = d.kind === 'database'
           return (
             <div
               key={d.id}
@@ -89,21 +90,35 @@ export function DeploymentsView() {
             >
               <div className="flex items-start gap-3">
                 <button
-                  onClick={() => selectProject(d.projectId)}
-                  className="shrink-0 hover:opacity-80 transition-opacity"
+                  onClick={() => d.projectId && selectProject(d.projectId)}
+                  disabled={!d.projectId}
+                  className="shrink-0 hover:opacity-80 transition-opacity disabled:cursor-default disabled:hover:opacity-100"
                   title={d.projectName}
                 >
-                  <StackGlyph stack={project?.stack ?? 'node'} size={32} />
+                  {isDb ? (
+                    <div className="w-8 h-8 rounded-md bg-sky-500/15 border border-sky-500/30 flex items-center justify-center">
+                      <Database size={16} className="text-sky-500" />
+                    </div>
+                  ) : (
+                    <StackGlyph stack={project?.stack ?? 'node'} size={32} />
+                  )}
                 </button>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
                     <button
-                      onClick={() => selectProject(d.projectId)}
-                      className="text-[14px] font-semibold hover:text-primary transition-colors"
+                      onClick={() => d.projectId && selectProject(d.projectId)}
+                      disabled={!d.projectId}
+                      className="text-[14px] font-semibold hover:text-primary transition-colors disabled:hover:text-current disabled:cursor-default"
                     >
-                      {d.projectName}
+                      {d.projectName || d.commitMessage}
                     </button>
                     <Badge variant="outline" className="text-[10px] capitalize h-5">{d.environment}</Badge>
+                    {isDb && (
+                      <Badge variant="outline" className="text-[10px] h-5 text-sky-500 border-sky-500/30 bg-sky-500/10">
+                        <Database size={9} className="mr-0.5" />
+                        Database
+                      </Badge>
+                    )}
                     {d.rollbackOfId && (
                       <Badge variant="outline" className="text-[10px] h-5">
                         <History size={9} className="mr-0.5" />
@@ -113,7 +128,7 @@ export function DeploymentsView() {
                   </div>
                   <div className="text-[12px] mt-0.5">{d.commitMessage}</div>
                   <div className="text-[11px] text-muted-foreground font-mono mt-1 flex items-center gap-2 flex-wrap">
-                    <span>{d.commitSha}</span>
+                    <span>{d.commitSha || '—'}</span>
                     <span className="text-border">·</span>
                     <span>{d.branch}</span>
                     <span className="text-border">·</span>
@@ -133,7 +148,8 @@ export function DeploymentsView() {
                 </div>
               </div>
 
-              {/* Pipeline */}
+              {/* Pipeline — empty for a database provision (no stages). */}
+              {d.steps.length > 0 && (
               <div className="mt-3 flex items-center gap-1 overflow-x-auto">
                 {d.steps.map((s, idx) => (
                   <React.Fragment key={s.stage}>
@@ -167,8 +183,11 @@ export function DeploymentsView() {
                   </React.Fragment>
                 ))}
               </div>
+              )}
 
-              {d.status === 'healthy' && (
+              {/* ponytail: roll back only applies to app deploys, not database
+                  provisions (a DB provision has no previous image to revert to). */}
+              {d.status === 'healthy' && !isDb && d.projectId && (
                 <div className="mt-3 flex items-center gap-2">
                   <Button
                     variant="outline"
@@ -179,7 +198,7 @@ export function DeploymentsView() {
                     <History size={11} className="mr-1" />
                     Roll back
                   </Button>
-                  <Button variant="ghost" size="sm" className="h-7 text-[11px]" onClick={() => selectProject(d.projectId)}>
+                  <Button variant="ghost" size="sm" className="h-7 text-[11px]" onClick={() => selectProject(d.projectId!)}>
                     View project →
                   </Button>
                 </div>

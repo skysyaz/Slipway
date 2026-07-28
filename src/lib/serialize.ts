@@ -120,8 +120,9 @@ type DeploymentRow = Prisma.DeploymentGetPayload<{ include: { steps: true } }>
 export function serializeDeployment(d: DeploymentRow, projectName?: string) {
   return {
     id: d.id,
-    projectId: d.projectId,
-    projectName: projectName ?? d.projectId,
+    projectId: d.projectId ?? undefined,
+    projectName: projectName ?? d.projectId ?? "",
+    kind: d.kind,
     commitSha: d.commitSha,
     commitMessage: d.commitMessage,
     branch: d.branch,
@@ -167,6 +168,7 @@ export function serializeDatabase(d: {
   dbName: string | null
   internalPort: number | null
   dockerContainerId: string | null
+  environment: string | null
   createdAt: Date
 }) {
   return {
@@ -189,6 +191,7 @@ export function serializeDatabase(d: {
     dbName: d.dbName ?? undefined,
     internalPort: d.internalPort ?? undefined,
     dockerContainerId: d.dockerContainerId ?? undefined,
+    environment: d.environment ?? undefined,
     createdAt: d.createdAt.toISOString(),
     // password is intentionally NOT serialized here — reveal it only via the
     // dedicated /api/databases/:id/credentials route.

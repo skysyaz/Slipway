@@ -32,13 +32,34 @@ function AppShell() {
   const refetchAll = useSlipway((s) => s.refetchAll)
 
   // Hydrate from the API on mount, then poll for server-side progress (deploy
-  // progression, backups completing, notifications) every 4s.
+  // progression, backups completing, notifications) every 5s.
+  // ponytail: PAUSE the poll when the tab is hidden (visibilitychange) — a
+  // backgrounded dashboard sampling `docker stats` + `du` every few seconds is
+  // pure waste on the host (and the source of the "dashboard feels heavy"
+  // symptom). Resumes on focus. The interval is cleared + recreated, not
+  // no-op'd, so no leaked timer fires while hidden.
   React.useEffect(() => {
     void hydrate()
-    const id = setInterval(() => {
-      void refetchAll()
-    }, 4000)
-    return () => clearInterval(id)
+    let id: ReturnType<typeof setInterval> | null = null
+    const start = () => {
+      if (id === null) id = setInterval(() => void refetchAll(), 5000)
+    }
+    const stop = () => {
+      if (id !== null) {
+        clearInterval(id)
+        id = null
+      }
+    }
+    const onVis = () => {
+      if (document.hidden) stop()
+      else start()
+    }
+    start()
+    document.addEventListener('visibilitychange', onVis)
+    return () => {
+      stop()
+      document.removeEventListener('visibilitychange', onVis)
+    }
   }, [hydrate, refetchAll])
 
   return (

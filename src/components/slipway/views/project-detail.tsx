@@ -796,16 +796,13 @@ function EnvTab({ project }: { project: Project }) {
 
 function ProjectLogsTab({ projectId }: { projectId: string }) {
   const logs = useSlipway((s) => s.logs)
-  const pushLog = useSlipway((s) => s.pushLog)
   const [paused, setPaused] = React.useState(false)
   const [filter, setFilter] = React.useState<string>('all')
   const containerRef = React.useRef<HTMLDivElement>(null)
-
-  React.useEffect(() => {
-    if (paused) return
-    const id = setInterval(() => pushLog(), 1200)
-    return () => clearInterval(id)
-  }, [paused, pushLog])
+  // ponytail: real logs arrive via the /api/logs/stream SSE feed (see LogsView),
+  // so there is nothing to poll here. The old setInterval(pushLog, 1200) was
+  // firing a no-op every 1.2s — dropped (bug 7 leaked-interval cleanup).
+  void projectId
 
   React.useEffect(() => {
     if (containerRef.current && !paused) {

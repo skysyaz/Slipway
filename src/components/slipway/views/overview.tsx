@@ -304,7 +304,7 @@ function RecentDeployments({
           return (
             <button
               key={d.id}
-              onClick={() => onProjectClick(d.projectId)}
+              onClick={() => d.projectId && onProjectClick(d.projectId)}
               className="w-full text-left px-4 py-2.5 hover:bg-accent/40 transition-colors flex items-center gap-3"
             >
               <StackGlyph stack={project?.stack ?? 'node'} size={26} />

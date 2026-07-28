@@ -43,6 +43,7 @@ import { api } from '@/lib/api'
 import { databaseVersions, databasePorts, latestDbVersion, dbMeta } from '@/lib/slipway/data'
 import { useToast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
+import type { Environment } from '@/lib/slipway/types'
 
 // Shared field wrapper for compact dialogs
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
@@ -89,6 +90,7 @@ export function NewDatabaseDialog() {
   const setOpen = useSlipway((s) => s.setNewDatabaseOpen)
   const addDatabase = useSlipway((s) => s.addDatabase)
   const projects = useSlipway((s) => s.projects)
+  const globalEnv = useSlipway((s) => s.env)
   const { toast } = useToast()
   const { submitting, run } = useSubmit()
 
@@ -98,6 +100,10 @@ export function NewDatabaseDialog() {
   const [size, setSize] = React.useState('20')
   const [projectId, setProjectId] = React.useState('')
   const [backups, setBackups] = React.useState(true)
+  // ponytail: default the env to the global toggle (so "Staging" is preselected
+  // when that's the active filter), falling back to production. Tagged onto the
+  // DB row so it filters + shows as that env in Deployments (bug 6).
+  const [environment, setEnvironment] = React.useState<Environment>('production')
   // one-time credentials reveal after a successful (real) provision
   const [creds, setCreds] = React.useState<{ username?: string; password?: string; dbName?: string; host?: string; port?: number } | null>(null)
 
@@ -109,8 +115,12 @@ export function NewDatabaseDialog() {
       setSize('20')
       setProjectId('')
       setBackups(true)
+      setEnvironment(globalEnv && globalEnv !== 'all' ? globalEnv : 'production')
       setCreds(null)
+    } else {
+      setEnvironment(globalEnv && globalEnv !== 'all' ? globalEnv : 'production')
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
 
   const versions = databaseVersions[kind] ?? []
@@ -189,6 +199,16 @@ export function NewDatabaseDialog() {
                 className="font-mono text-[13px]"
               />
             </Field>
+            <Field label="Environment">
+              <Select value={environment} onValueChange={(v) => setEnvironment(v as Environment)}>
+                <SelectTrigger className="h-9 text-[13px] capitalize"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="production">Production</SelectItem>
+                  <SelectItem value="staging">Staging</SelectItem>
+                  <SelectItem value="preview">Preview</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
             <Field label="Link to project (optional)">
               <Select value={projectId} onValueChange={setProjectId}>
                 <SelectTrigger className="h-9 text-[13px]"><SelectValue placeholder="—" /></SelectTrigger>
@@ -249,6 +269,7 @@ export function NewDatabaseDialog() {
                         projectId: projectId || undefined,
                         port: databasePorts[kind] ?? 5432,
                         backupsEnabled: backups,
+                        environment,
                       })
                       setCreds({
                         username: (created as { username?: string }).username,

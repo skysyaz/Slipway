@@ -157,7 +157,9 @@ async function fetchOrKeep<T>(url: string, keep: T): Promise<T> {
 }
 
 // ponytail: the set of "new X" + add-service dialog flags that are mutually
-// exclusive. openOnly() clears all of them then sets one true.
+// exclusive. openOverlay() clears ALL overlays (dialogs + the command palette +
+// the notifications panel) then sets one true — so only ONE panel can be open
+// at any time (fixes "click another button, the previously open panel stays").
 type DialogFlag =
   | 'newDeploymentOpen'
   | 'newDatabaseOpen'
@@ -172,6 +174,12 @@ type DialogFlag =
   | 'newWebhookOpen'
   | 'newTokenOpen'
   | 'addServiceOpen'
+
+// ponytail: notifOpen + commandOpen are overlays too, so they join the mutex —
+// opening a dialog closes the notifications panel / command palette and
+// vice-versa. The local topbar dropdowns (UserMenu, EnvToggle) close themselves
+// via useAnyOverlayOpen() (see topbar.tsx).
+type OverlayFlag = DialogFlag | 'notifOpen' | 'commandOpen'
 
 const DIALOG_FALSE: Record<DialogFlag, boolean> = {
   newDeploymentOpen: false,
@@ -189,11 +197,17 @@ const DIALOG_FALSE: Record<DialogFlag, boolean> = {
   addServiceOpen: false,
 }
 
-function openOnly(
+const OVERLAY_FALSE: Record<OverlayFlag, boolean> = {
+  ...DIALOG_FALSE,
+  notifOpen: false,
+  commandOpen: false,
+}
+
+function openOverlay(
   set: (partial: Partial<SlipwayState>) => void,
-  flag: DialogFlag
+  flag: OverlayFlag
 ) {
-  set({ ...DIALOG_FALSE, [flag]: true })
+  set({ ...OVERLAY_FALSE, [flag]: true })
 }
 
 export const useSlipway = create<SlipwayState>((set, get) => ({
@@ -219,47 +233,46 @@ export const useSlipway = create<SlipwayState>((set, get) => ({
   hydrated: false,
   hydrating: false,
 
-  // ponytail: the "new X" + add-service dialogs are mutually exclusive — opening
-  // one closes the others (fixes "click another button, the previous dialog
-  // stays open"). Each setter, when opening, first clears every sibling flag.
-  // notifOpen / commandOpen are intentionally NOT in this group (they're
-  // separate overlays). Close (open=false) only touches its own flag.
+  // ponytail: the "new X" + add-service dialogs AND the command palette +
+  // notifications panel are ALL mutually exclusive — opening one closes every
+  // other overlay (fixes "click another button, the previous panel stays
+  // open"). Close (open=false) only touches its own flag.
   newDeploymentOpen: false,
-  setNewDeploymentOpen: (open) => (open ? openOnly(set, 'newDeploymentOpen') : set({ newDeploymentOpen: false })),
+  setNewDeploymentOpen: (open) => (open ? openOverlay(set, 'newDeploymentOpen') : set({ newDeploymentOpen: false })),
   rollbackTarget: null,
   setRollbackTarget: (d) => set({ rollbackTarget: d }),
   notifOpen: false,
-  setNotifOpen: (open) => set({ notifOpen: open }),
+  setNotifOpen: (open) => (open ? openOverlay(set, 'notifOpen') : set({ notifOpen: false })),
   commandOpen: false,
-  setCommandOpen: (open) => set({ commandOpen: open }),
+  setCommandOpen: (open) => (open ? openOverlay(set, 'commandOpen') : set({ commandOpen: false })),
   newDatabaseOpen: false,
-  setNewDatabaseOpen: (open) => (open ? openOnly(set, 'newDatabaseOpen') : set({ newDatabaseOpen: false })),
+  setNewDatabaseOpen: (open) => (open ? openOverlay(set, 'newDatabaseOpen') : set({ newDatabaseOpen: false })),
   newVolumeOpen: false,
-  setNewVolumeOpen: (open) => (open ? openOnly(set, 'newVolumeOpen') : set({ newVolumeOpen: false })),
+  setNewVolumeOpen: (open) => (open ? openOverlay(set, 'newVolumeOpen') : set({ newVolumeOpen: false })),
   newDomainOpen: false,
-  setNewDomainOpen: (open) => (open ? openOnly(set, 'newDomainOpen') : set({ newDomainOpen: false })),
+  setNewDomainOpen: (open) => (open ? openOverlay(set, 'newDomainOpen') : set({ newDomainOpen: false })),
   newBackupOpen: false,
-  setNewBackupOpen: (open) => (open ? openOnly(set, 'newBackupOpen') : set({ newBackupOpen: false })),
+  setNewBackupOpen: (open) => (open ? openOverlay(set, 'newBackupOpen') : set({ newBackupOpen: false })),
   newBackupScheduleOpen: false,
-  setNewBackupScheduleOpen: (open) => (open ? openOnly(set, 'newBackupScheduleOpen') : set({ newBackupScheduleOpen: false })),
+  setNewBackupScheduleOpen: (open) => (open ? openOverlay(set, 'newBackupScheduleOpen') : set({ newBackupScheduleOpen: false })),
   newPreviewOpen: false,
-  setNewPreviewOpen: (open) => (open ? openOnly(set, 'newPreviewOpen') : set({ newPreviewOpen: false })),
+  setNewPreviewOpen: (open) => (open ? openOverlay(set, 'newPreviewOpen') : set({ newPreviewOpen: false })),
   newServerOpen: false,
-  setNewServerOpen: (open) => (open ? openOnly(set, 'newServerOpen') : set({ newServerOpen: false })),
+  setNewServerOpen: (open) => (open ? openOverlay(set, 'newServerOpen') : set({ newServerOpen: false })),
   newSshKeyOpen: false,
-  setNewSshKeyOpen: (open) => (open ? openOnly(set, 'newSshKeyOpen') : set({ newSshKeyOpen: false })),
+  setNewSshKeyOpen: (open) => (open ? openOverlay(set, 'newSshKeyOpen') : set({ newSshKeyOpen: false })),
   newRegistryOpen: false,
-  setNewRegistryOpen: (open) => (open ? openOnly(set, 'newRegistryOpen') : set({ newRegistryOpen: false })),
+  setNewRegistryOpen: (open) => (open ? openOverlay(set, 'newRegistryOpen') : set({ newRegistryOpen: false })),
   newWebhookOpen: false,
-  setNewWebhookOpen: (open) => (open ? openOnly(set, 'newWebhookOpen') : set({ newWebhookOpen: false })),
+  setNewWebhookOpen: (open) => (open ? openOverlay(set, 'newWebhookOpen') : set({ newWebhookOpen: false })),
   newTokenOpen: false,
-  setNewTokenOpen: (open) => (open ? openOnly(set, 'newTokenOpen') : set({ newTokenOpen: false })),
+  setNewTokenOpen: (open) => (open ? openOverlay(set, 'newTokenOpen') : set({ newTokenOpen: false })),
   addServiceOpen: false,
-  setAddServiceOpen: (open) => (open ? openOnly(set, 'addServiceOpen') : set({ addServiceOpen: false })),
+  setAddServiceOpen: (open) => (open ? openOverlay(set, 'addServiceOpen') : set({ addServiceOpen: false })),
 
-  closeAllDialogs: () => set(DIALOG_FALSE),
+  closeAllDialogs: () => set(OVERLAY_FALSE),
   openDialog: (name) => {
-    const map: Record<string, keyof SlipwayState> = {
+    const map: Record<string, OverlayFlag> = {
       deployment: 'newDeploymentOpen',
       database: 'newDatabaseOpen',
       volume: 'newVolumeOpen',
@@ -273,9 +286,11 @@ export const useSlipway = create<SlipwayState>((set, get) => ({
       webhook: 'newWebhookOpen',
       token: 'newTokenOpen',
       addService: 'addServiceOpen',
+      command: 'commandOpen',
+      notifications: 'notifOpen',
     }
     const key = map[name]
-    if (key) openOnly(set, key as DialogFlag)
+    if (key) openOverlay(set, key)
   },
 
   hydrate: async () => {
@@ -368,7 +383,9 @@ export const useSlipway = create<SlipwayState>((set, get) => ({
 
   addDatabase: async (input) => {
     const created = await api.post<DatabaseInstance & { password?: string; username?: string; dbName?: string }>('/api/databases', input)
-    await get().refetch(['databases', 'activity', 'notifications'])
+    // ponytail: refetch deployments too — a DB provision now creates a
+    // Deployment row (kind=database), so it appears in the Deployments view.
+    await get().refetch(['databases', 'deployments', 'activity', 'notifications'])
     return created
   },
 
@@ -476,6 +493,31 @@ export const useSlipway = create<SlipwayState>((set, get) => ({
 }))
 
 // helpers
+// ponytail: single derived "is any store-level overlay open" flag. The local
+// topbar dropdowns (UserMenu, EnvToggle) subscribe to this and auto-close when
+// a dialog / command palette / notifications panel opens — so only one overlay
+// is ever on screen. One selector = one re-render source, no prop drilling.
+export function useAnyOverlayOpen(): boolean {
+  return useSlipway(
+    (s) =>
+      s.newDeploymentOpen ||
+      s.newDatabaseOpen ||
+      s.newVolumeOpen ||
+      s.newDomainOpen ||
+      s.newBackupOpen ||
+      s.newBackupScheduleOpen ||
+      s.newPreviewOpen ||
+      s.newServerOpen ||
+      s.newSshKeyOpen ||
+      s.newRegistryOpen ||
+      s.newWebhookOpen ||
+      s.newTokenOpen ||
+      s.addServiceOpen ||
+      s.notifOpen ||
+      s.commandOpen,
+  )
+}
+
 export function useProject(id: string | null) {
   return useSlipway((s) => (id ? s.projects.find((p) => p.id === id) ?? null : null))
 }

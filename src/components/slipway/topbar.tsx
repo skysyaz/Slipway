@@ -21,7 +21,7 @@ import {
   LogOut,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { useSlipway } from '@/lib/slipway/store'
+import { useSlipway, useAnyOverlayOpen } from '@/lib/slipway/store'
 import { useTheme } from './theme-provider'
 import { useAuth } from './auth-provider'
 import { Kbd, TimeAgo } from './format'
@@ -117,6 +117,23 @@ function UserMenu() {
   const setView = useSlipway((s) => s.setView)
   // initial for the avatar — admin → "AD"
   const initials = (user?.username ?? 'admin').slice(0, 2).toUpperCase()
+  const anyOverlay = useAnyOverlayOpen()
+
+  // ponytail: auto-close this local dropdown the moment any store overlay
+  // (dialog / command palette / notifications) opens — only one panel on screen.
+  React.useEffect(() => {
+    if (anyOverlay) setOpen(false)
+  }, [anyOverlay])
+  // Escape closes the open dropdown; listener is added only while open and
+  // removed on close + unmount (bug 2 — no leaked listener).
+  React.useEffect(() => {
+    if (!open) return
+    const h = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    window.addEventListener('keydown', h)
+    return () => window.removeEventListener('keydown', h)
+  }, [open])
 
   return (
     <div className="relative">
@@ -183,6 +200,7 @@ function UserMenu() {
 
 function EnvToggle({ env, onChange }: { env: Environment | 'all'; onChange: (e: Environment | 'all') => void }) {
   const [open, setOpen] = React.useState(false)
+  const anyOverlay = useAnyOverlayOpen()
   const options: { id: Environment; label: string; color: string }[] = [
     { id: 'production', label: 'Production', color: 'oklch(0.7 0.17 158)' },
     { id: 'staging', label: 'Staging', color: 'oklch(0.78 0.16 70)' },
@@ -190,6 +208,19 @@ function EnvToggle({ env, onChange }: { env: Environment | 'all'; onChange: (e: 
   ]
   const current = options.find((o) => o.id === env)
   const isAll = env === 'all'
+
+  // ponytail: same auto-close + Escape discipline as UserMenu (bugs 1 & 2).
+  React.useEffect(() => {
+    if (anyOverlay) setOpen(false)
+  }, [anyOverlay])
+  React.useEffect(() => {
+    if (!open) return
+    const h = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    window.addEventListener('keydown', h)
+    return () => window.removeEventListener('keydown', h)
+  }, [open])
 
   return (
     <div className="relative">

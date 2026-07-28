@@ -159,7 +159,14 @@ model EnvVar {
 
 model Deployment {
   id            String   @id @default(cuid())
-  projectId     String
+  // ponytail: nullable so a SHARED database provision (no project) can still be
+  // recorded as a Deployment and show in the Deployments view. On project delete
+  // the row is kept (SetNull) rather than cascaded — a db provision log survives
+  // the project it was briefly linked to.
+  projectId     String?
+  // ponytail: distinguishes an app deploy (project) from a database provision,
+  // so the Deployments view can render the right icon + avoid a fake pipeline.
+  kind          String   @default("project") // project | database
   commitSha     String   @default("")
   commitMessage String  @default("")
   branch        String   @default("main")
@@ -171,7 +178,7 @@ model Deployment {
   durationMs    Int?
   rollbackOfId  String?
   url           String?
-  project       Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project       Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
   steps         DeploymentStep[]
 
   @@index([projectId])
@@ -216,6 +223,10 @@ model DatabaseInstance {
   password     String? // generated on provision
   dbName       String? // the database name inside the engine (postgres/mysql/mongo)
   internalPort Int?    // engine's in-container port (5432, 3306, …)
+  // ponytail: environment tag so a DB provisioned under Staging shows as
+  // Staging and the Databases view filters by the global env toggle (bug 6).
+  // Nullable: pre-existing rows have no env and only show under "All".
+  environment  String? // production | staging | preview
   createdAt    DateTime @default(now())
   project      Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
 }

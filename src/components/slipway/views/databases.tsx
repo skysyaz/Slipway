@@ -69,13 +69,24 @@ import type { DatabaseInstance } from '@/lib/slipway/types'
 export function DatabasesView() {
   const databases = useSlipway((s) => s.databases)
   const projects = useSlipway((s) => s.projects)
+  const env = useSlipway((s) => s.env)
   const setNewDatabaseOpen = useSlipway((s) => s.setNewDatabaseOpen)
   const restartDatabase = useSlipway((s) => s.restartDatabase)
   const runBackup = useSlipway((s) => s.runBackup)
   const selectProject = useSlipway((s) => s.selectProject)
   const [query, setQuery] = React.useState('')
 
-  const filtered = databases.filter((d) => !query || d.name.includes(query) || d.kind.includes(query))
+  // ponytail: honor the global env toggle (bug 6) — a DB tagged Staging only
+  // shows under Staging / All. Pre-existing rows (no env) show only under All.
+  const filtered = React.useMemo(
+    () =>
+      databases.filter((d) => {
+        if (env !== 'all' && d.environment !== env) return false
+        if (!query) return true
+        return d.name.includes(query) || d.kind.includes(query)
+      }),
+    [databases, env, query],
+  )
 
   const totalStorage = databases.reduce((a, d) => a + d.storageGb, 0)
   const usedStorage = databases.reduce((a, d) => a + d.usedGb, 0)
@@ -138,6 +149,9 @@ export function DatabasesView() {
                   <div className="flex items-center gap-2">
                     <span className="text-[14px] font-semibold truncate">{db.name}</span>
                     <StatusDot status={noContainer ? 'offline' : db.status} />
+                    {db.environment && (
+                      <Badge variant="outline" className="text-[9px] capitalize">{db.environment}</Badge>
+                    )}
                     {noContainer && (
                       <Badge variant="outline" className="text-[9px] text-amber-500 border-amber-500/30 bg-amber-500/10">no container</Badge>
                     )}
