@@ -46,6 +46,7 @@ import {
   defaultPortFor,
   type DetectedStack,
 } from "./git-deploy"
+import { encryptSecret, decryptSecret } from "./security"
 import type { DeployOptions } from "./simulate"
 
 const STAGES = [
@@ -116,8 +117,22 @@ export { bytesToGb, getHostDiskUsage }
 // stale subset is re-measured. Ceiling: du walks the whole volume each TTL tick
 // — fine for self-host scale; if a volume holds millions of inodes, raise
 // VOL_SIZE_TTL or switch to a daemon sidecar.
+// R8: bounded LRU cache — the dashboard polls this on a timer and volume names
+// are unbounded (scanned hosts can have hundreds). Cap entries and evict the
+// least-recently-used on insert so memory stays flat.
+const VOL_SIZE_CAP = 512
 const volSizeCache = new Map<string, { t: number; bytes: number }>()
 const VOL_SIZE_TTL = 60_000
+
+function volSizeSet(name: string, bytes: number, t: number): void {
+  // LRU: refresh recency on hit, evict oldest when over cap.
+  if (volSizeCache.has(name)) volSizeCache.delete(name)
+  volSizeCache.set(name, { t, bytes })
+  if (volSizeCache.size > VOL_SIZE_CAP) {
+    const oldest = volSizeCache.keys().next().value
+    if (oldest !== undefined) volSizeCache.delete(oldest)
+  }
+}
 
 async function getVolumeSizes(docker: Docker, names: string[]): Promise<Map<string, number>> {
   const out = new Map<string, number>()
@@ -147,22 +162,30 @@ async function getVolumeSizes(docker: Docker, names: string[]): Promise<Map<stri
         await pullImage(docker, "alpine:latest")
         c = await make()
       }
-      await c.start()
-      // ponytail: MUST wait for du to finish before reading logs. A 5 GB volume
-      // takes seconds to walk; without wait, logs({follow:false}) returns the
-      // (still empty) buffer and every volume reads 0 — the real bug behind
-      // "storage shows 0 MB".
-      await c.wait()
-      const logs = await c.logs({ stdout: true, stderr: false, follow: false })
-      const text = logs.toString("utf8")
-      for (const line of text.split("\n")) {
-        const m = line.match(/^(\d+)\s+\/vol\/(.+)/)
-        if (m) {
-          volSizeCache.set(m[2], { t: now, bytes: Number(m[1]) })
-          out.set(m[2], Number(m[1]))
+      // R8: release the helper container in a finally — a throw between start()
+      // and the old bottom-of-block remove() (or a kill mid-wait) left the
+      // labeled helper running. The label lets the reaper sweep any orphan too.
+      try {
+        await c.start()
+        // ponytail: MUST wait for du to finish before reading logs. A 5 GB volume
+        // takes seconds to walk; without wait, logs({follow:false}) returns the
+        // (still empty) buffer and every volume reads 0 — the real bug behind
+        // "storage shows 0 MB".
+        await c.wait()
+        const logs = await c.logs({ stdout: true, stderr: false, follow: false })
+        const text = logs.toString("utf8")
+        for (const line of text.split("\n")) {
+          const m = line.match(/^(\d+)\s+\/vol\/(.+)/)
+          if (m) {
+            volSizeSet(m[2], Number(m[1]), now)
+            out.set(m[2], Number(m[1]))
+          }
         }
+      } finally {
+        await c.remove({ force: true }).catch((e) => {
+          console.warn("[docker-ops] volume-size helper remove failed:", (e as Error).message)
+        })
       }
-      await c.remove({ force: true }).catch(() => {})
     } catch {
       /* du not supported / unavailable — leave df values */
     }
@@ -1084,17 +1107,25 @@ async function dockerBuildFromDir(
   })
 }
 
-/** True when `docker buildx version` works (plugin installed). Cached. */
-let buildxCached: boolean | null = null
+/** True when `docker buildx version` works (plugin installed). Cached with a
+ * TTL so a daemon restart / plugin install is picked up without a process
+ * restart (the old permanent cache went stale forever). */
+let buildxCached: { v: boolean; t: number } | null = null
+const BUILDX_CACHE_TTL = 60_000
 async function dockerBuildxAvailable(): Promise<boolean> {
-  if (buildxCached !== null) return buildxCached
+  const now = Date.now()
+  if (buildxCached && now - buildxCached.t < BUILDX_CACHE_TTL) return buildxCached.v
   try {
     await runCli(["buildx", "version"])
-    buildxCached = true
+    buildxCached = { v: true, t: now }
   } catch {
-    buildxCached = false
+    buildxCached = { v: false, t: now }
   }
-  return buildxCached
+  return buildxCached.v
+}
+/** Test/daemon hook: force the buildx probe to recompute on next call. */
+export function invalidateBuildxCache(): void {
+  buildxCached = null
 }
 
 // Every real container id tied to a project: the project's own container
@@ -1151,9 +1182,26 @@ export async function realRestart(
       failures.push((e as Error).message)
     }
   }
-  if (failures.length === ids.length) {
-    await db.project.update({ where: { id: projectId }, data: { status: "error" } }).catch(() => {})
-    throw new Error(`Restart failed: ${failures[0]}`)
+  // R2: report per-service results honestly — never all-green when any
+  // container failed. Partial success (some restarted) is marked as such, not
+  // silently "running".
+  if (failures.length > 0) {
+    const okCount = ids.length - failures.length
+    if (failures.length === ids.length) {
+      await db.project.update({ where: { id: projectId }, data: { status: "error" } }).catch(() => {})
+      throw new Error(`Restart failed: ${failures[0]}`)
+    }
+    // partial: mark degraded, increment only for the ones that restarted
+    await db.project.update({ where: { id: projectId }, data: { status: "degraded" } }).catch(() => {})
+    await recordActivity("scale", `partial restart of ${project.name}: ${okCount}/${ids.length} containers restarted (${failures[0]})`, {
+      projectId,
+      actor,
+    })
+    await db.service.updateMany({
+      where: { projectId, ...(serviceId ? { id: serviceId } : {}) },
+      data: { restarts: { increment: okCount } },
+    })
+    throw new Error(`Restart partial: ${okCount}/${ids.length} containers restarted; ${failures[0]}`)
   }
   await db.service.updateMany({
     where: { projectId, ...(serviceId ? { id: serviceId } : {}) },
@@ -1780,7 +1828,8 @@ export async function realSetDatabaseCredentials(
   // genPassword() now guarantees complexity itself and provisioning sets the
   // stored value verbatim, so there is no suffix anywhere. Reintroducing one
   // here would recreate the "revealed credentials don't work" bug.
-  const currentAdmin = row.password ?? ""
+  // R6: stored encrypted at rest; decrypt only here, at the connection point.
+  const currentAdmin = decryptDbPassword(row.password)
 
   // Escape a SQL string literal. Postgres / MSSQL only need quote doubling.
   // MySQL/MariaDB default to backslash escapes too — a password containing `\'`
@@ -1832,9 +1881,10 @@ export async function realSetDatabaseCredentials(
 
   // Store exactly what was set on the engine — /credentials reveals this value
   // verbatim and it must be the password that actually works.
+  // R6: encrypted at rest (decrypted on reveal / connect).
   await db.databaseInstance.update({
     where: { id: dbId },
-    data: { password: newPass, username },
+    data: { password: encryptSecret(newPass), username },
   })
   await recordActivity("database", `rotated credentials for database ${row.name}`, { actor })
   await emit(
@@ -1907,7 +1957,8 @@ export async function realTestDatabaseConnection(
   const engine = ENGINE_SPECS[row.kind]
   if (!engine) return { ok: false, error: `Unsupported engine: ${row.kind}` }
   const user = row.username ?? engine.defaultUser ?? ""
-  const pass = row.password ?? ""
+  // R6: decrypt the stored credential only where it authenticates.
+  const pass = decryptDbPassword(row.password)
   const port = String(engine.internalPort)
   let cmd: string[]
   switch (row.kind) {
@@ -2068,7 +2119,7 @@ export async function realScale(
   if (!serviceId) {
     await db.project.update({ where: { id: projectId }, data: { status, replicas } })
   }
-  await recordActivity("scale", `scaled ${project.name} to ${replicas} replica(s)`, {
+  await recordActivity("scale", `scaled ${project.name} to ${replicas} ${replicas === 1 ? "replica" : "replicas"}`, {
     projectId,
     actor,
   })
@@ -2272,7 +2323,9 @@ export async function realBackup(
       const ext = backupExtension(row.kind)
       fileName = `db-${backupSlug(target)}-${stamp}.${ext}`
       const dest = `/backups/${fileName}`
-      const spec = dumpCommandFor(row.kind, row, dest, ENGINE_SPECS[row.kind]?.internalPort ?? 0)
+      // R6: decrypt the stored credential for the dump (env, never argv).
+      const dumpRow = { ...row, password: decryptDbPassword(row.password) }
+      const spec = dumpCommandFor(row.kind, dumpRow, dest, ENGINE_SPECS[row.kind]?.internalPort ?? 0)
       if (!spec) {
         return await fail(
           `Slipway has no dump tool for ${row.kind}. Supported: postgres, mysql, mariadb, mongodb, redis, valkey.`
@@ -2425,6 +2478,20 @@ async function pruneBackups(
 // app containers currently publish no ports / join no network. That wiring is
 // a follow-up — not faked here.
 // ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * R6: decrypt a stored DB password. Legacy rows (pre-encryption) are plaintext
+ * and pass through unchanged, so nothing breaks on upgrade; new rows are
+ * AES-256-GCM and decrypt only at the connection/reveal point.
+ */
+export function decryptDbPassword(stored: string | null | undefined): string {
+  if (!stored) return ""
+  try {
+    return decryptSecret(stored)
+  } catch {
+    return stored
+  }
+}
 
 interface EngineSpec {
   image: (version: string) => string
@@ -2579,9 +2646,21 @@ export async function realProvisionDatabase(
   const volumeName = `slipway-db-${spec.id}`
 
   try {
+    // R6: encrypt the DB password at rest. SQLite (slipway.db) is a file on the
+    // host that backups/scp/support dumps routinely exfiltrate; a plaintext
+    // column there hands out every database root password. Encrypt with the env
+    // master key (fail closed if missing); decrypt only when connecting.
+    let storedPassword = password
+    try {
+      storedPassword = encryptSecret(password)
+    } catch (e) {
+      throw new Error(
+        `Cannot provision database: ${(e as Error).message}. Set SLIPWAY_MASTER_KEY so credentials can be stored encrypted.`
+      )
+    }
     await db.databaseInstance.update({
       where: { id: dbInstanceId },
-      data: { status: "restarting", username: username || null, password, dbName },
+      data: { status: "restarting", username: username || null, password: storedPassword, dbName },
     })
 
     await pullImage(docker, engine.image(spec.version))

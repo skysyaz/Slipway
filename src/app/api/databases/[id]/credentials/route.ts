@@ -1,6 +1,7 @@
 import { route } from "@/lib/http"
 import { db } from "@/lib/db"
 import { realSetDatabaseCredentials } from "@/lib/docker-ops"
+import { decryptDbPassword } from "@/lib/docker-ops"
 
 export const dynamic = "force-dynamic"
 
@@ -17,7 +18,8 @@ export const GET = route(async (_req, params) => {
   if (!row) return new Response(JSON.stringify({ error: "not found" }), { status: 404 })
 
   const user = row.username ?? ""
-  const pass = row.password ?? ""
+  // R6: stored encrypted at rest; decrypt only for this explicit reveal.
+  const pass = decryptDbPassword(row.password)
   const host = row.host || "localhost"
   const port = row.port
   const published = port && port > 0
