@@ -47,6 +47,8 @@ import { TimeAgo, Duration, Memory, Cpu as CpuFmt, Sparkline, BytesShort, lastV 
 import { cn, pluralize } from '@/lib/utils'
 import { useToast, toast } from '@/hooks/use-toast'
 import { useDismiss } from '@/lib/slipway/dismiss'
+import { deriveCertStatus, reachabilityFromProbe } from '@/lib/status'
+import { validIp } from '@/lib/security'
 import type { Project, Deployment, Service } from '@/lib/slipway/types'
 
 export function ProjectDetailView() {
@@ -235,12 +237,21 @@ export function ProjectDetailView() {
 function UrlBadge({ url, domains, projectId }: { url: string; domains: Project['domains']; projectId: string }) {
   const isHttps = url.startsWith('https://')
   const host = url.replace(/^https?:\/\//, '').split('/')[0].split(':')[0]
-  const hostIsIp = /^\d+\.\d+\.\d+\.\d+$/.test(host)
-  // META-RULE 2: cert badge derived from one status model; IP mode never
-  // "Cert pending". Reachability probed server-side, not assumed.
-  const activeCert = domains.find((d) => d.ssl === 'managed' && d.status === 'active' && d.https)
-  const failedCert = domains.find((d) => d.status === 'failed')
+  // R5: octet-range-checked IP detection (shared helper, not a d{1,3} regex).
+  const hostIsIp = validIp(host)
   const display = url.replace(/^https?:\/\//, '')
+
+  // META-RULE 2: derive cert from the status model — IP mode is NEVER
+  // "Cert pending" and never ACME. Use the best domain row for this host.
+  const dom = domains.find((d) => d.hostname === host || display.startsWith(d.hostname)) ?? domains[0]
+  const cert = deriveCertStatus({
+    hostname: host,
+    ssl: dom?.ssl ?? (isHttps ? 'managed' : 'disabled'),
+    status: dom?.status ?? 'pending',
+    https: isHttps,
+    createdAt: undefined,
+    isIp: hostIsIp,
+  })
 
   const [probe, setProbe] = React.useState<{ state: string; label: string; tone: string; hint?: string } | null>(null)
   React.useEffect(() => {
@@ -276,29 +287,15 @@ function UrlBadge({ url, domains, projectId }: { url: string; domains: Project['
           {probe.label}
         </Badge>
       )}
-      {/* cert chip (derived, never "pending" for an IP) */}
-      {hostIsIp ? (
-        <Badge variant="outline" className={cn('text-[10px] h-5 shrink-0', isHttps ? 'bg-amber-500/10 text-amber-500 border-amber-500/30' : '')} title={isHttps ? 'Public CAs do not issue certs for bare IPs — self-signed.' : 'Not encrypted.'}>
-          {isHttps ? 'Self-signed' : 'HTTP'}
-        </Badge>
-      ) : isHttps && activeCert ? (
-        <Badge variant="outline" className="text-[10px] h-5 bg-emerald-500/10 text-emerald-500 border-emerald-500/30 shrink-0">
-          <Check size={10} className="mr-0.5" />
-          HTTPS
-        </Badge>
-      ) : failedCert ? (
-        <Badge variant="outline" className="text-[10px] h-5 bg-rose-500/10 text-rose-500 border-rose-500/30 shrink-0">
-          Cert failed
-        </Badge>
-      ) : isHttps ? (
-        <Badge variant="outline" className="text-[10px] h-5 bg-amber-500/10 text-amber-500 border-amber-500/30 shrink-0">
-          Cert pending
-        </Badge>
-      ) : (
-        <Badge variant="outline" className="text-[10px] h-5 shrink-0">
-          HTTP
-        </Badge>
-      )}
+      {/* cert chip (derived; IP never "Cert pending") */}
+      <Badge
+        variant="outline"
+        className={cn('text-[10px] h-5 shrink-0', toneClass[cert.tone])}
+        title={cert.reason}
+      >
+        {cert.state === 'active' && <Check size={10} className="mr-0.5" />}
+        {cert.label}
+      </Badge>
       <ExternalLink size={12} className="text-muted-foreground shrink-0" />
     </div>
   )

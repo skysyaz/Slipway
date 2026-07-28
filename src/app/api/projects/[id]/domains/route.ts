@@ -60,15 +60,20 @@ export const POST = route(async (req, params, auth) => {
 
   // Persist the record first (the row is the audit trail); then attempt the
   // real Traefik route and reflect whether it landed in `status`.
+  // Bug B: an IP/self-signed/HTTP domain is NEVER "pending" — there is no ACME
+  // order to wait on, so it is active as soon as the route lands. Only a real
+  // Let's Encrypt order (custom domain) starts pending.
   const domain = await db.domain.create({
     data: {
       projectId: params.id,
       hostname,
       type: String(body.type || "primary"),
-      ssl: tlsMode === "http" ? "disabled" : "managed",
+      // IP mode: mark selfsigned (not "managed"), so no surface reads it as a
+      // pending/ACME cert. http → disabled.
+      ssl: tlsMode === "http" ? "disabled" : tlsMode === "selfsigned" ? "custom" : "managed",
       sslExpiry: null,
       https: tlsMode !== "http",
-      status: "pending",
+      status: tlsMode === "letsencrypt" ? "pending" : "active",
     },
   })
 
@@ -90,7 +95,8 @@ export const POST = route(async (req, params, auth) => {
 
   await db.domain.update({
     where: { id: domain.id },
-    data: { status: routed ? (tlsMode === "http" ? "active" : "pending") : "failed" },
+    // selfsigned/http land as active (no cert to wait on); only ACME stays pending.
+    data: { status: routed ? (tlsMode === "letsencrypt" ? "pending" : "active") : "failed" },
   })
 
   await emit(
