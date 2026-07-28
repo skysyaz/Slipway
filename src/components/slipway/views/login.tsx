@@ -6,6 +6,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { SlipwayMark } from '../icons'
 import { useAuth } from '../auth-provider'
+import { APP_LABEL } from '@/config/app'
 import {
   Loader2,
   ShieldCheck,
@@ -53,7 +54,7 @@ export function LoginView() {
           <SlipwayMark size={36} />
           <div>
             <div className="text-[18px] font-semibold tracking-tight">Slipway</div>
-            <div className="text-[11px] text-muted-foreground font-mono">v1.4.2 · self-hosted</div>
+            <div className="text-[11px] text-muted-foreground font-mono">{APP_LABEL}</div>
           </div>
         </div>
 

@@ -1,8 +1,7 @@
 import { route } from "@/lib/http"
 import { db } from "@/lib/db"
 import bcrypt from "bcryptjs"
-import { readFileSync } from "fs"
-import { join } from "path"
+import { APP_VERSION } from "@/config/app"
 
 export const dynamic = "force-dynamic"
 
@@ -12,13 +11,11 @@ export const GET = route(async (_req, _params, auth) => {
   for (const r of rows) settings[r.key] = r.value
   const user = auth.userId ? await db.user.findUnique({ where: { id: auth.userId } }) : null
 
-  let version = "0.0.0"
-  try {
-    const pkg = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8"))
-    version = String(pkg.version || version)
-  } catch {
-    /* keep default */
-  }
+  // ponytail: bug 2 — read the displayed version from the single source of
+  // truth (src/config/app), not package.json (whose version is the npm package
+  // version, decoupled from the app version shown in the UI). Keeps the
+  // Settings "Slipway server" card in sync with the sidebar/login label.
+  const version = APP_VERSION
 
   return {
     settings,

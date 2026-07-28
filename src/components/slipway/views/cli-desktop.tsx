@@ -18,6 +18,7 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { useToast, toast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
+import { APP_TAG } from '@/config/app'
 
 export function CliDesktopView() {
   const [activeOs, setActiveOs] = React.useState<'macos' | 'linux' | 'windows'>('macos')
@@ -181,9 +182,9 @@ function InstallSection({ activeOs, setActiveOs }: { activeOs: 'macos' | 'linux'
         <div className="text-[14px] font-semibold mb-3">Install the desktop app</div>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           {[
-            { os: 'macOS', detail: 'Universal · macOS 12+', file: 'Slipway-1.4.2.dmg', size: '14.2 MB', icon: Apple },
-            { os: 'Linux', detail: 'AppImage · .deb · .rpm', file: 'Slipway-1.4.2.AppImage', size: '15.8 MB', icon: Package },
-            { os: 'Windows', detail: 'Windows 10+ · MSI', file: 'Slipway-1.4.2.msi', size: '16.1 MB', icon: Monitor },
+            { os: 'macOS', detail: 'Universal · macOS 12+', file: `Slipway-${APP_TAG}.dmg`, size: '14.2 MB', icon: Apple },
+            { os: 'Linux', detail: 'AppImage · .deb · .rpm', file: `Slipway-${APP_TAG}.AppImage`, size: '15.8 MB', icon: Package },
+            { os: 'Windows', detail: 'Windows 10+ · MSI', file: `Slipway-${APP_TAG}.msi`, size: '16.1 MB', icon: Monitor },
           ].map((d) => {
             const Icon = d.icon
             return (
@@ -215,8 +216,8 @@ function InstallSection({ activeOs, setActiveOs }: { activeOs: 'macos' | 'linux'
           cmd="curl -fsSL https://slipway.run/install-server.sh | sh"
         />
         <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <CodeBlock label="Docker" cmd={'docker run -d -p 80:80 -p 443:443 \\\n  -v /var/run/docker.sock:/var/run/docker.sock \\\n  -v slipway-data:/data \\\n  --name slipway \\\n  ghcr.io/slipway/server:1.4.2'} multiline />
-          <CodeBlock label="Docker Compose" cmd={'services:\n  slipway:\n    image: ghcr.io/slipway/server:1.4.2\n    ports: ["80:80", "443:443"]\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n      - slipway-data:/data\n    restart: unless-stopped\nvolumes:\n  slipway-data:'} multiline />
+          <CodeBlock label="Docker" cmd={`docker run -d -p 80:80 -p 443:443 \\\n  -v /var/run/docker.sock:/var/run/docker.sock \\\n  -v slipway-data:/data \\\n  --name slipway \\\n  ghcr.io/slipway/server:${APP_TAG}`} multiline />
+          <CodeBlock label="Docker Compose" cmd={`services:\n  slipway:\n    image: ghcr.io/slipway/server:${APP_TAG}\n    ports: ["80:80", "443:443"]\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n      - slipway-data:/data\n    restart: unless-stopped\nvolumes:\n  slipway-data:`} multiline />
         </div>
         <div className="mt-3 flex items-center gap-2 text-[12px] text-muted-foreground">
           <Smartphone size={12} />

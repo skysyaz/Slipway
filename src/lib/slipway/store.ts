@@ -210,11 +210,57 @@ function openOverlay(
   set({ ...OVERLAY_FALSE, [flag]: true })
 }
 
-export const useSlipway = create<SlipwayState>((set, get) => ({
-  view: 'overview',
-  selectedProjectId: null,
-  setView: (view) => set({ view }),
-  selectProject: (id) => set({ selectedProjectId: id, view: 'project-detail' }),
+// ponytail: bug 1 — hash-based routing. The app uses state-based navigation
+// (this store's `view`), not a router lib, so a refresh reset `view` to its
+// 'overview' default and a shareable URL was impossible. The minimal fix that
+// still satisfies "refresh restores the page + shareable URL + browser
+// Back/Forward" is to mirror `view` to location.hash — zero dependencies, no
+// BrowserRouter server-rewrite-config needed on the static/standalone host.
+// project-detail carries its selected id as `#project-detail/<id>`. The
+// sidebar's active state is already derived from `view`, so it stays correct
+// once `view` tracks the hash.
+const VIEW_SET: ReadonlySet<NavView> = new Set<NavView>([
+  'overview', 'projects', 'project-detail', 'deployments', 'databases', 'storage',
+  'domains', 'metrics', 'logs', 'backups', 'previews', 'settings', 'cli',
+])
+function parseHash(): { view: NavView; projectId: string | null } {
+  if (typeof window === 'undefined') return { view: 'overview', projectId: null }
+  const raw = window.location.hash.replace(/^#/, '')
+  if (!raw) return { view: 'overview', projectId: null }
+  const [v, pid] = raw.split('/')
+  const view = VIEW_SET.has(v as NavView) ? (v as NavView) : 'overview'
+  const projectId = view === 'project-detail' && pid ? pid : null
+  return { view, projectId }
+}
+function writeHash(view: NavView, projectId: string | null) {
+  if (typeof window === 'undefined') return
+  const hash = view === 'project-detail' && projectId ? `#project-detail/${projectId}` : `#${view}`
+  if (window.location.hash !== hash) window.location.hash = hash
+}
+
+export const useSlipway = create<SlipwayState>((set, get) => {
+  const initial = parseHash()
+  // Sync external hash changes (browser Back/Forward, or a pasted shareable
+  // URL) back into the store. Registered once, client-only; idempotent.
+  if (typeof window !== 'undefined') {
+    window.addEventListener('hashchange', () => {
+      const p = parseHash()
+      const cur = get()
+      if (cur.view !== p.view) {
+        set({
+          view: p.view,
+          ...(p.view === 'project-detail' && p.projectId ? { selectedProjectId: p.projectId } : {}),
+        })
+      } else if (p.view === 'project-detail' && p.projectId && cur.selectedProjectId !== p.projectId) {
+        set({ selectedProjectId: p.projectId })
+      }
+    })
+  }
+  return {
+  view: initial.view,
+  selectedProjectId: initial.projectId,
+  setView: (view) => { writeHash(view, get().selectedProjectId); set({ view }) },
+  selectProject: (id) => { writeHash('project-detail', id); set({ selectedProjectId: id, view: 'project-detail' }) },
 
   env: 'all',
   setEnv: (env) => set({ env }),
@@ -492,7 +538,8 @@ export const useSlipway = create<SlipwayState>((set, get) => ({
     void body
     void level
   },
-}))
+  }
+})
 
 // helpers
 // ponytail: single derived "is any store-level overlay open" flag. The local

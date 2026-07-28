@@ -22,6 +22,7 @@ import {
 import { cn } from '@/lib/utils'
 import { useSlipway } from '@/lib/slipway/store'
 import { SlipwayMark } from './icons'
+import { APP_LABEL } from '@/config/app'
 import type { NavView } from '@/lib/slipway/types'
 
 const nav: Array<{ id: NavView; label: string; icon: React.ComponentType<{ className?: string; size?: number }>; group: 'build' | 'infra' | 'observe' | 'system' }> = [
@@ -66,7 +67,7 @@ export function Sidebar() {
         <SlipwayMark size={26} />
         <div className="flex flex-col leading-tight">
           <span className="text-sm font-semibold tracking-tight">Slipway</span>
-          <span className="text-[10px] text-muted-foreground font-mono">v1.4.2 · self-hosted</span>
+          <span className="text-[10px] text-muted-foreground font-mono">{APP_LABEL}</span>
         </div>
       </div>
 

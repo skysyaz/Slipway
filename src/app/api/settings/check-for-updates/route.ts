@@ -1,6 +1,5 @@
 import { route } from "@/lib/http"
-import { readFileSync } from "fs"
-import { join } from "path"
+import { APP_VERSION } from "@/config/app"
 
 export const dynamic = "force-dynamic"
 
@@ -9,13 +8,9 @@ export const dynamic = "force-dynamic"
 // Without that env var there is no canonical registry to poll, so we report
 // "unknown" rather than fabricating a fake latest version.
 export const GET = route(async () => {
-  let current = "0.0.0"
-  try {
-    const pkg = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8"))
-    current = String(pkg.version || current)
-  } catch {
-    /* keep default */
-  }
+  // ponytail: bug 2 — current version comes from the single source of truth
+  // (src/config/app), not package.json, so it matches what the UI displays.
+  const current = APP_VERSION
   const latest = process.env.SLIPWAY_LATEST_VERSION
   const known = Boolean(latest)
   const upToDate = known ? current === latest : true
