@@ -21,6 +21,7 @@ import {
   Server,
   ScanLine,
   Loader2,
+  AlertTriangle,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -30,7 +31,7 @@ import { StackGlyph, StatusDot } from '../icons'
 import { TimeAgo, Duration, Sparkline, BytesShort, lastV } from '../format'
 import { useToast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
-import type { Deployment, Project } from '@/lib/slipway/types'
+import type { Deployment, Project, HostHealth, TraefikIssue } from '@/lib/slipway/types'
 
 export function OverviewView() {
   const projects = useSlipway((s) => s.projects)
@@ -40,6 +41,7 @@ export function OverviewView() {
   const servers = useSlipway((s) => s.servers)
   const activity = useSlipway((s) => s.activity)
   const metrics = useSlipway((s) => s.metrics)
+  const hostHealth = useSlipway((s) => s.hostHealth)
   const selectProject = useSlipway((s) => s.selectProject)
   const setNewDeploymentOpen = useSlipway((s) => s.setNewDeploymentOpen)
   const setView = useSlipway((s) => s.setView)
@@ -119,6 +121,11 @@ export function OverviewView() {
         </div>
       </section>
 
+      {/* ponytail: host-health banner — real disk/inode/ENOSPC alert. The single
+          source of truth is /api/host-health (fs.statfsSync, works at 100% full).
+          Fires WARN ≥80%, CRITICAL ≥90%, FULL at 100% / <512MB free / ENOSPC canary. */}
+      <HostHealthBanner health={hostHealth} />
+
       {/* Top stats */}
       <section className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <StatCard
@@ -170,10 +177,103 @@ export function OverviewView() {
 
         {/* Right column — activity + cluster health */}
         <div className="space-y-6">
-          <ClusterHealth servers={servers} databases={databases} volumes={volumes} />
+          <ClusterHealth servers={servers} databases={databases} volumes={volumes} health={hostHealth} />
+          <RoutingTlsPanel health={hostHealth} />
           <ActivityFeed activity={activity.slice(0, 8)} />
           <UpcomingMaintenance />
         </div>
+      </div>
+    </div>
+  )
+}
+
+// ponytail: host-health banner — real disk + inode + ENOSPC alert (Bug 1, 2).
+// Colors: full/critical = rose, warn = amber, ok = hidden (no noise when healthy).
+function HostHealthBanner({ health }: { health: HostHealth | null }) {
+  if (!health) return null
+  const enospc = health.enospc
+  const show = health.status !== 'ok' || enospc.length > 0
+  if (!show) return null
+  const full = health.status === 'full'
+  const critical = health.status === 'critical'
+  const tone = full || enospc.length ? 'rose' : critical ? 'rose' : 'amber'
+  const worst = health.mounts.slice().sort((a, b) => b.usedPct - a.usedPct)[0]
+  const freeGb = (health.freeBytes / 1e9).toFixed(1)
+  const title =
+    full || enospc.length
+      ? 'DISK FULL — deployments and databases will fail'
+      : critical
+        ? 'Disk critically low'
+        : 'Disk usage high'
+  const Icon = full || enospc.length ? AlertTriangle : critical ? AlertTriangle : HardDrive
+  const cls =
+    tone === 'rose'
+      ? 'border-rose-500/40 bg-rose-500/10'
+      : 'border-amber-500/40 bg-amber-500/10'
+  return (
+    <section className={cn('rounded-xl border p-4 flex items-start gap-3', cls)}>
+      <div className={cn('w-9 h-9 rounded-lg flex items-center justify-center shrink-0', tone === 'rose' ? 'bg-rose-500/15' : 'bg-amber-500/15')}>
+        <Icon size={16} className={tone === 'rose' ? 'text-rose-500' : 'text-amber-500'} />
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className={cn('text-[13px] font-semibold', tone === 'rose' ? 'text-rose-500' : 'text-amber-600')}>{title}</div>
+        <div className="text-[12px] text-muted-foreground mt-0.5 leading-relaxed">
+          {worst ? (
+            <>
+              <span className="font-mono text-foreground">{worst.path}</span>: {Math.round(worst.usedPct)}% used ·{' '}
+              <span className="font-mono text-foreground">{freeGb} GB</span> free across watched mounts.
+            </>
+          ) : null}
+          {health.inodesCritical && <div className="text-rose-500">Inodes critical on a watched mount — a full inode table also causes ENOSPC.</div>}
+        </div>
+        {enospc.length > 0 && (
+          <div className="mt-2 space-y-1">
+            {enospc.slice(0, 4).map((h, i) => (
+              <div key={i} className="text-[12px] text-rose-500 flex items-center gap-1.5">
+                <CircleDot size={10} className="shrink-0" />
+                <span className="font-mono font-medium">{h.service}:</span>
+                <span className="text-muted-foreground truncate" title={h.message}>out of disk — {h.message.slice(0, 80)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  )
+}
+
+// ponytail: Routing / TLS health panel — turns Traefik's log soup into
+// actionable per-domain / per-app items (Bug 4). Hidden when there's nothing to
+// show (no noise when healthy).
+function RoutingTlsPanel({ health }: { health: HostHealth | null }) {
+  const issues = health?.traefik ?? []
+  if (!issues.length) return null
+  const icon = (kind: TraefikIssue['kind']) =>
+    kind === 'acme' ? Globe : kind === 'watcher' ? HardDrive : kind === 'middleware' ? AlertTriangle : AlertTriangle
+  const tone = (sev: TraefikIssue['severity']) =>
+    sev === 'critical' ? 'text-rose-500' : sev === 'error' ? 'text-rose-500' : 'text-amber-500'
+  return (
+    <div className="rounded-xl border border-border bg-card">
+      <div className="h-11 px-4 flex items-center gap-2 border-b border-border">
+        <Globe size={14} className="text-primary" />
+        <div className="text-[13px] font-semibold">Routing / TLS</div>
+        <Badge variant="outline" className="text-[10px] h-5 ml-auto">{issues.length} issue{issues.length === 1 ? '' : 's'}</Badge>
+      </div>
+      <div className="p-3 space-y-2 max-h-[280px] overflow-y-auto">
+        {issues.map((iss, i) => {
+          const Icon = icon(iss.kind)
+          return (
+            <div key={i} className="rounded-md border border-border/70 p-2.5">
+              <div className="flex items-center gap-1.5 text-[12px] font-medium">
+                <Icon size={12} className={cn('shrink-0', tone(iss.severity))} />
+                <span className="truncate">{iss.message}</span>
+              </div>
+              {iss.domain && <div className="text-[11px] text-muted-foreground font-mono mt-1">{iss.domain}</div>}
+              {iss.appSlug && <div className="text-[11px] text-muted-foreground font-mono mt-1">app: {iss.appSlug}</div>}
+              {iss.hint && <div className="text-[11px] text-muted-foreground mt-1 leading-snug">{iss.hint}</div>}
+            </div>
+          )
+        })}
       </div>
     </div>
   )
@@ -390,15 +490,24 @@ function ClusterHealth({
   servers,
   databases,
   volumes,
+  health,
 }: {
   servers: any[]
   databases: any[]
   volumes: any[]
+  health: HostHealth | null
 }) {
   const online = servers.filter((s) => s.status === 'online').length
   const totalDiskUsed = servers.reduce((a, s) => a + s.diskUsedGb, 0)
   const totalDisk = servers.reduce((a, s) => a + s.diskGb, 0)
   const diskPct = totalDisk ? Math.round((totalDiskUsed / totalDisk) * 100) : 0
+  // ponytail: color + width the cluster disk bar from the REAL host-health
+  // reading (Bug 1) — never green and never "0 / 200" when the device is full.
+  // Falls back to the per-server sum only when the agent hasn't reported yet.
+  const diskStatus = health?.status ?? (diskPct >= 90 ? 'critical' : diskPct >= 80 ? 'warn' : 'ok')
+  const realPct = health ? Math.round(health.disk.usedPct) : diskPct
+  const realUsedGb = health ? health.disk.usedBytes / 1e9 : totalDiskUsed
+  const realTotalGb = health ? health.disk.totalBytes / 1e9 : totalDisk
   const dbRunning = databases.filter((d) => d.status === 'running').length
 
   return (
@@ -419,10 +528,13 @@ function ClusterHealth({
         <div className="pt-2 border-t border-border">
           <div className="flex items-center justify-between text-[12px] mb-1.5">
             <span className="text-muted-foreground">Cluster disk usage</span>
-            <span className="font-mono">{diskPct}% · <BytesShort gb={totalDiskUsed} /> / <BytesShort gb={totalDisk} /></span>
+            <span className={cn('font-mono', diskStatus === 'full' || diskStatus === 'critical' ? 'text-rose-500' : diskStatus === 'warn' ? 'text-amber-500' : '')}>{realPct}% · <BytesShort gb={realUsedGb} /> / <BytesShort gb={realTotalGb} /></span>
           </div>
           <div className="h-1.5 rounded-full bg-muted overflow-hidden">
-            <div className="h-full bg-primary" style={{ width: `${diskPct}%` }} />
+            <div
+              className={cn('h-full', diskStatus === 'full' || diskStatus === 'critical' ? 'bg-rose-500' : diskStatus === 'warn' ? 'bg-amber-500' : 'bg-primary')}
+              style={{ width: `${realPct}%` }}
+            />
           </div>
         </div>
       </div>

@@ -17,6 +17,7 @@ import type {
   Environment,
   Domain,
   MetricPoint,
+  HostHealth,
 } from './types'
 import { envKey } from './types'
 
@@ -58,6 +59,7 @@ interface SlipwayState {
   activity: ActivityEvent[]
   logs: LogLine[]
   metrics: Metrics
+  hostHealth: HostHealth | null
   hydrated: boolean
   hydrating: boolean
 
@@ -305,6 +307,7 @@ export const useSlipway = create<SlipwayState>((set, get) => {
   activity: [],
   logs: [],
   metrics: EMPTY_METRICS,
+  hostHealth: null,
   hydrated: false,
   hydrating: false,
 
@@ -393,6 +396,10 @@ export const useSlipway = create<SlipwayState>((set, get) => {
       fetchOrKeep<Notification[]>('/api/notifications', s.notifications).then((v) => set({ notifications: v })),
       fetchOrKeep<ActivityEvent[]>('/api/activity', s.activity).then((v) => set({ activity: v })),
       fetchOrKeep<Metrics>('/api/metrics', s.metrics).then((v) => set({ metrics: v })),
+      // ponytail: host-health is independent — disk/inodes/ENOSPC/Traefik must
+      // appear even if metrics is slow (it samples `docker stats`). One source
+      // of truth for the overview banner + disk gauges + routing/TLS panel.
+      fetchOrKeep<HostHealth | null>('/api/host-health', s.hostHealth).then((v) => set({ hostHealth: v })),
     ])
   },
 

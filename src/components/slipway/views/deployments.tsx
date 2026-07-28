@@ -213,6 +213,29 @@ export function DeploymentsView() {
               </div>
               )}
 
+              {/* ponytail: show the REAL failure reason (Bug 3) — the diagnosed
+                  cause + action from the captured stderr, plus the failing
+                  step's log tail — instead of a generic "error". */}
+              {d.status === 'failed' && (d.error || d.steps.some((s) => s.log)) && (
+                <div className="mt-3 rounded-md border border-rose-500/30 bg-rose-500/5 p-2.5 text-[12px]">
+                  <div className="flex items-center gap-1.5 font-medium text-rose-500">
+                    <AlertTriangle size={12} />
+                    {d.error ? d.error.split('→')[0].trim() : 'Deploy failed'}
+                  </div>
+                  {d.error && d.error.includes('→') && (
+                    <div className="text-[11px] text-muted-foreground mt-1">{d.error.split('→').slice(1).join('→').trim()}</div>
+                  )}
+                  {(() => {
+                    const step = d.steps.find((s) => s.log)
+                    return step?.log ? (
+                      <pre className="mt-2 text-[10px] font-mono text-muted-foreground/80 whitespace-pre-wrap break-words [overflow-wrap:anywhere] max-h-32 overflow-y-auto">
+                        {step.label}: {step.log}
+                      </pre>
+                    ) : null
+                  })()}
+                </div>
+              )}
+
               {/* ponytail: roll back only applies to app deploys, not database
                   provisions (a DB provision has no previous image to revert to). */}
               {d.status === 'healthy' && !isDb && d.projectId && (

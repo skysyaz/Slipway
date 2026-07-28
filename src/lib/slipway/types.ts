@@ -9,6 +9,48 @@ export type Environment = 'production' | 'staging' | 'preview'
 // every env-filtered view (Deployments / Projects / Databases).
 export const envKey = (e: unknown): string => String(e ?? '').trim().toLowerCase()
 
+// ponytail: host-health client shape (mirrors src/lib/host-health.ts). ONE
+// source of truth the overview banner, disk gauges, routing/TLS panel, and
+// domains list all read from.
+export type DiskStatus = 'ok' | 'warn' | 'critical' | 'full'
+
+export interface DiskMount {
+  path: string
+  totalBytes: number
+  usedBytes: number
+  freeBytes: number
+  usedPct: number
+  inodesTotal: number
+  inodesUsed: number
+  inodePct: number
+  status: DiskStatus
+}
+
+export interface EnospcHit {
+  service: string
+  message: string
+}
+
+export interface TraefikIssue {
+  severity: 'critical' | 'error' | 'warn'
+  kind: 'config' | 'middleware' | 'acme' | 'watcher'
+  domain?: string
+  appSlug?: string
+  message: string
+  hint?: string
+}
+
+export interface HostHealth {
+  agent: 'up' | 'down'
+  mounts: DiskMount[]
+  disk: { totalBytes: number; usedBytes: number; freeBytes: number; usedPct: number; status: DiskStatus }
+  status: DiskStatus
+  freeBytes: number
+  inodesCritical: boolean
+  enospc: EnospcHit[]
+  traefik: TraefikIssue[]
+}
+
 export type DeploymentStatus =
   | 'queued'
   | 'building'
@@ -61,6 +103,7 @@ export interface PipelineStep {
   finishedAt?: string
   durationMs?: number
   logLines?: number
+  log?: string
 }
 
 export interface Deployment {
@@ -80,6 +123,7 @@ export interface Deployment {
   steps: PipelineStep[]
   rollbackOfId?: string
   url?: string
+  error?: string
 }
 
 export interface EnvVar {

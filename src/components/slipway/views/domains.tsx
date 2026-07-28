@@ -16,7 +16,27 @@ export function DomainsView() {
   const selectProject = useSlipway((s) => s.selectProject)
   const setNewDomainOpen = useSlipway((s) => s.setNewDomainOpen)
   const scanHost = useSlipway((s) => s.scanHost)
+  const hostHealth = useSlipway((s) => s.hostHealth)
   const { toast } = useToast()
+
+  // ponytail: cross-reference the Routing/TLS panel's ACME failures (Bug 4) so a
+  // red cert on this list matches the panel. Match by hostname (suffix-aware so
+  // a wildcard/root issue flags subdomains too).
+  const acmeByDomain = React.useMemo(() => {
+    const m = new Map<string, { message: string; hint?: string }>()
+    for (const iss of hostHealth?.traefik ?? []) {
+      if (iss.kind === 'acme' && iss.domain) m.set(iss.domain.toLowerCase(), { message: iss.message, hint: iss.hint })
+    }
+    return m
+  }, [hostHealth])
+  const acmeHitFor = (hostname: string) => {
+    const h = hostname.toLowerCase()
+    const hit = acmeByDomain.get(h)
+    if (hit) return hit
+    // suffix match: an issue for example.com flags app.example.com
+    for (const [dom, v] of acmeByDomain) if (h.endsWith('.' + dom)) return v
+    return null
+  }
 
   // ponytail: scan loading + last result feedback. The old Domains view had no
   // scan trigger at all — running a scan from elsewhere returned silently and
@@ -137,19 +157,31 @@ export function DomainsView() {
             <div className="col-span-2">
               <Badge variant="outline" className="text-[10px] capitalize">{d.type}</Badge>
             </div>
-            <div className="col-span-2 text-[11px] text-muted-foreground">
-              {d.ssl === 'managed' ? (
-                <>
-                  Let’s Encrypt
-                  {d.sslExpiry && (
-                    <div className="text-[10px] mt-0.5">
-                      renews <TimeAgo ts={d.sslExpiry} className="text-[10px]" />
-                    </div>
-                  )}
-                </>
-              ) : (
-                <span className="capitalize">{d.ssl}</span>
-              )}
+            <div className="col-span-2 text-[11px] text-muted-foreground min-w-0">
+              {(() => {
+                const hit = acmeHitFor(d.hostname)
+                if (hit) {
+                  return (
+                    <span className="text-rose-500" title={hit.hint}>
+                      TLS failed
+                      <div className="text-[10px] mt-0.0.5 text-muted-foreground truncate">{hit.message}</div>
+                      {hit.hint && <div className="text-[10px] mt-0.5 text-amber-600 truncate">{hit.hint}</div>}
+                    </span>
+                  )
+                }
+                return d.ssl === 'managed' ? (
+                  <>
+                    Let’s Encrypt
+                    {d.sslExpiry && (
+                      <div className="text-[10px] mt-0.5">
+                        renews <TimeAgo ts={d.sslExpiry} className="text-[10px]" />
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <span className="capitalize">{d.ssl}</span>
+                )
+              })()}
             </div>
             <div className="col-span-2 flex justify-end">
               <StatusDot status={d.status} />

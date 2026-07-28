@@ -22,6 +22,7 @@ import type Docker from "dockerode"
 import { randomBytes } from "node:crypto"
 import { db } from "./db"
 import { emit, recordActivity } from "./notify"
+import { diagnoseDeployError, demuxToString } from "./host-health"
 import type { DeployOptions } from "./simulate"
 
 const STAGES = [
@@ -67,80 +68,17 @@ async function getDocker(): Promise<Docker> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Real storage snapshot — surfaces honest per-volume usage + the host disk
-// capacity. Docker volumes have no size cap by default, so the "of X" the
-// dashboard used to show was a 20 GB-per-volume fiction. Instead we read:
-//   - per-volume used bytes from `docker system df` (Volumes[].Size)
-//   - the real in-container mount path (Destination) from each container's Mounts
-//   - the host filesystem total/used by running `df -B1 /host` in a throwaway
-//     alpine that bind-mounts / read-only
-// ponytail ceiling: df reports the filesystem holding /, which is where the
-// docker data root lives on a default install; if the operator put the docker
-// root on a separate FS this reflects /, not that FS — honest best-effort.
+// Host disk measurement now lives in src/lib/host-health.ts (fs.statfsSync on
+// the /host bind). The old code here ran a throwaway `alpine` container to
+// `df /host` — and CREATING that container writes to the docker data dir, which
+// is on the very FS that fills up, so the measurement failed exactly when the
+// disk was full and fell back to the lying 0/200 defaults (the outage). statfs
+// is a syscall that allocates nothing, so it works at 100% full. Re-exported
+// here so existing callers (servers/storage routes) keep working through ONE
+// source of truth.
 // ─────────────────────────────────────────────────────────────────────────────
-
-let hostDiskCache: { t: number; total: number; used: number } | null = null
-const HOST_DISK_TTL = 60_000
-
-// ponytail: ONE bytes→GB helper for every disk display (storage host, per-server
-// disk, cluster disk). Decimal GB (bytes / 1e9) to match what BytesShort renders.
-// Round at the DISPLAY layer, not here, so aggregation sums full precision.
-export function bytesToGb(bytes: number): number {
-  return bytes / 1e9
-}
-
-// Public wrapper around getHostDisk: returns the real host-disk {totalBytes,
-// usedBytes} or null when the engine is down. Cached 60s so the 5s poll that
-// hits /api/servers doesn't spawn a `df` container each time. (bug 2/4)
-export async function getHostDiskUsage(): Promise<{ totalBytes: number; usedBytes: number } | null> {
-  try {
-    return await getHostDisk(await getDocker())
-  } catch {
-    return null
-  }
-}
-
-async function getHostDisk(docker: Docker): Promise<{ totalBytes: number; usedBytes: number } | null> {
-  if (hostDiskCache && Date.now() - hostDiskCache.t < HOST_DISK_TTL) {
-    return { totalBytes: hostDiskCache.total, usedBytes: hostDiskCache.used }
-  }
-  const run = async (): Promise<{ totalBytes: number; usedBytes: number } | null> => {
-    try {
-      let c: Docker.Container
-      try {
-        c = await docker.createContainer({
-          Image: "alpine:latest",
-          Cmd: ["df", "-B1", "/host"],
-          Tty: true,
-          HostConfig: { Binds: ["/:/host:ro"], AutoRemove: true },
-        })
-      } catch {
-        // alpine not present locally — pull it (one-time ~7 MB) then retry
-        await pullImage(docker, "alpine:latest")
-        c = await docker.createContainer({
-          Image: "alpine:latest",
-          Cmd: ["df", "-B1", "/host"],
-          Tty: true,
-          HostConfig: { Binds: ["/:/host:ro"], AutoRemove: true },
-        })
-      }
-      await c.start()
-      const logs = await c.logs({ stdout: true, stderr: false, follow: false })
-      // Tty=true → logs is a plain Buffer, last line is the /host row
-      const line = logs.toString("utf8").trim().split("\n").pop() || ""
-      const parts = line.split(/\s+/)
-      const total = Number(parts[1])
-      const used = Number(parts[2])
-      if (!total) return null
-      return { totalBytes: total, usedBytes: used }
-    } catch {
-      return null
-    }
-  }
-  const r = await run()
-  if (r) hostDiskCache = { t: Date.now(), total: r.totalBytes, used: r.usedBytes }
-  return r
-}
+import { bytesToGb, getHostDiskUsage } from "./host-health"
+export { bytesToGb, getHostDiskUsage }
 
 // ponytail: per-volume used bytes via `du`. `docker.df()` returns Volumes[].Size
 // as `undefined` on most Docker installs (the CLI `docker system df -v` shows
@@ -273,7 +211,7 @@ export async function getStorageSnapshot(opts?: {
     }
   }
 
-  const host = await getHostDisk(docker)
+  const host = await getHostDiskUsage()
   return { volumes, mounts, host }
 }
 
@@ -383,6 +321,14 @@ async function runPipeline(
 
   try {
     const docker = await getDocker()
+    let failingOrder = 0 // ponytail: track which step threw so its log tail is persisted (Bug 3)
+    const failStep = async (order: number, log: string) => {
+      failingOrder = order
+      await db.deploymentStep.updateMany({
+        where: { deploymentId, order },
+        data: { status: "failed", finishedAt: new Date(), log: log.slice(-1200) || null },
+      })
+    }
     // checkout / detect / install — cheap for image source
     await setStep(deploymentId, 1, "building"); await sleep(300); await finish(1)
     await setStep(deploymentId, 2, "building"); await sleep(300); await finish(2)
@@ -417,13 +363,11 @@ async function runPipeline(
         await runCli(["build", "-t", tag, ctxPath])
         image = tag
         await finish(5)
-      } catch {
-        // no Dockerfile / build failed → mark failed and let ops fall back
-        await db.deploymentStep.updateMany({
-          where: { deploymentId, order: 5 },
-          data: { status: "failed", finishedAt: new Date() },
-        })
-        throw new Error("build failed (no Dockerfile or build error)")
+      } catch (be) {
+        // ponytail: persist the real build stderr (ENOSPC etc.) on the step + rethrow
+        const tail = ((be as Error & { stderr?: string }).stderr || (be as Error).message || "").trim()
+        await failStep(5, tail)
+        throw be
       }
     }
 
@@ -434,7 +378,12 @@ async function runPipeline(
     await setStep(deploymentId, 8, "building")
     let containerId: string | null = null
     if (ctx.source === "compose") {
-      await runCli(["compose", "-f", String(ctx.opts.composePath || "/dev/null"), "up", "-d"])
+      try {
+        await runCli(["compose", "-f", String(ctx.opts.composePath || "/dev/null"), "up", "-d"])
+      } catch (ce) {
+        await failStep(8, ((ce as Error & { stderr?: string }).stderr || (ce as Error).message || "").trim())
+        throw ce
+      }
     } else {
       const name = containerName(projectSlug, "app")
       // remove any existing container with the same name
@@ -444,17 +393,24 @@ async function runPipeline(
       } catch {
         /* ignore */
       }
-      const created = await docker.createContainer({
-        Image: image,
-        name,
-        Env: [],
-        HostConfig: {
-          RestartPolicy: { Name: "unless-stopped" },
-          PortBindings: {},
-        },
-      })
-      await created.start()
-      containerId = created.id
+      try {
+        const created = await docker.createContainer({
+          Image: image,
+          name,
+          Env: [],
+          HostConfig: {
+            RestartPolicy: { Name: "unless-stopped" },
+            PortBindings: {},
+          },
+        })
+        await created.start()
+        containerId = created.id
+      } catch (re) {
+        // ponytail: create/start fails with ENOSPC when the docker FS is full —
+        // persist the real error tail on the release step (Bug 3).
+        await failStep(8, ((re as Error).message || "").trim())
+        throw re
+      }
     }
     await finish(8)
 
@@ -464,7 +420,15 @@ async function runPipeline(
       const c = docker.getContainer(containerId)
       const info = await c.inspect()
       const running = info.State?.Running === true
-      if (!running) throw new Error("container exited after start")
+      if (!running) {
+        // ponytail: capture why it exited (crash-loop / ENOSPC init) for the UI.
+        const tail = await c
+          .logs({ stdout: true, stderr: true, follow: false })
+          .then((b) => demuxToString(b).slice(-1200))
+          .catch(() => "")
+        await failStep(9, tail)
+        throw new Error("container exited after start")
+      }
       await db.project.update({ where: { id: projectId }, data: { dockerContainerId: containerId } })
       await db.service.updateMany({
         where: { projectId },
@@ -492,27 +456,44 @@ async function runPipeline(
       { projectId, actor: ctx.actor }
     )
   } catch (e) {
+    // ponytail: diagnose the REAL cause from the captured stderr/error and
+    // persist it on the deployment (Bug 3) — the UI shows this instead of a
+    // generic "error". Maps ENOSPC / context-canceled / 401-403 / missing yml.
+    const errText = ((e as Error & { stderr?: string }).stderr || (e as Error).message || "").trim()
+    const diag = diagnoseDeployError(errText)
+    const errorStr = (diag ? `${diag.cause} → ${diag.action}` : errText).slice(0, 500)
     await db.deployment.update({
       where: { id: deploymentId },
-      data: { status: "failed", finishedAt: new Date() },
+      data: { status: "failed", finishedAt: new Date(), error: errorStr || null },
     })
     await db.project.update({ where: { id: projectId }, data: { status: "error" } })
     await emit(
       "deploy.failed",
       "deploy",
-      `deploy of ${projectName} failed: ${(e as Error).message}`,
-      { title: "Deploy failed", body: `${projectName}: ${(e as Error).message}`, level: "error", kind: "deploy" },
+      `deploy of ${projectName} failed: ${diag ? diag.cause : errText.slice(0, 160)}`,
+      { title: "Deploy failed", body: `${projectName}: ${diag ? `${diag.cause} — ${diag.action}` : errText.slice(0, 160)}`, level: "error", kind: "deploy" },
       { projectId, actor: ctx.actor }
     )
     throw e
   }
 }
 
-/** Run a `docker ...` CLI command (compose/build). Resolves on exit 0, rejects otherwise. */
-async function runCli(args: string[]): Promise<void> {
+/** Run a `docker ...` CLI command (compose/build). Resolves on exit 0 with
+ *  captured stdout+stderr; rejects with an Error carrying the stderr tail so the
+ *  deploy pipeline can persist the real failing-step output (Bug 3). */
+async function runCli(args: string[]): Promise<{ stdout: string; stderr: string }> {
   const { execFile } = await import("node:child_process")
-  await new Promise<void>((resolve, reject) => {
-    execFile("docker", args, { maxBuffer: 4 * 1024 * 1024 }, (err) => (err ? reject(err) : resolve()))
+  return new Promise((resolve, reject) => {
+    execFile("docker", args, { maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) {
+        const tail = (stderr || err.message || "").trim().slice(-1200)
+        const e = new Error(`docker ${args.join(" ")} failed: ${tail || err.message}`)
+        ;(e as Error & { stderr?: string }).stderr = tail
+        reject(e)
+      } else {
+        resolve({ stdout: stdout || "", stderr: stderr || "" })
+      }
+    })
   })
 }
 

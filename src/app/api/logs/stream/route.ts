@@ -1,31 +1,33 @@
 import { requireAuth } from "@/lib/server-auth"
 import { isDockerAvailable, dockerClient } from "@/lib/docker"
+import { sanitize } from "@/lib/host-health"
 
 export const dynamic = "force-dynamic"
 export const runtime = "nodejs"
 
-// ponytail: ONE log sanitizer (bug 3). Raw Docker log lines carry ANSI color
-// escapes (and occasional OSC/cursor sequences) which render as □□□ (tofu) in
-// the browser. Strip every escape variant + non-printable control chars (keep
-// \t) so the viewer shows clean text. Shared here (the only producer of log
-// lines) so the client never has to re-sanitize.
-const ANSI = [
-  /\x1b\[[0-9;?]*[a-zA-Z]/g, // CSI: colors, cursor moves
-  /\x1b\][^\x07]*(\x07|\x1b\\)/g, // OSC (title/set-icon) terminated by BEL or ST
-  /\x1b[=>]/g, // keypad modes
-  /\x1b[NOPDEHM78]/g, // single-char C1 controls
-]
-const CTRL = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g // keep \t (0x09) and \n (split already)
-function sanitizeLogLine(s: string): string {
-  let out = s
-  for (const re of ANSI) out = out.replace(re, "")
-  return out.replace(CTRL, "")
+// ponytail: severity from the cleaned line text. Postgres/Go panics are
+// critical; the rest map to the viewer's level colors. Parsed server-side so
+// the client never re-scans.
+function severityOf(line: string): "critical" | "error" | "warn" | "info" {
+  if (/^PANIC\b|panic:|\bfatal:|\bcould not write\b/i.test(line)) return "critical"
+  if (/\bERROR\b|\bERR\b|\bFATAL\b|Error:/i.test(line)) return "error"
+  if (/\bWARN(ING)?\b/i.test(line)) return "warn"
+  return "info"
 }
 
 /**
  * SSE stream of live container logs from the Docker engine. No fallback:
  * with the engine down there are no containers, so the stream reports that and
  * closes. With the engine up, it tails stdout/stderr of every running container.
+ *
+ * ROOT CAUSE of the □□□□ (tofu) boxes: dockerode `.logs({stdout,stderr})` on a
+ * non-TTY container returns a MULTIPLEXED stream — an 8-byte header per frame
+ * [streamType:1][length:4 BE][payload]. Decoding that header as UTF-8 produced
+ * the stray chars (b, }, s, u, t, c, @ = the low byte of the 4-byte length)
+ * before every timestamp. We now demux frame-by-frame, accumulating across
+ * chunks (a frame may span chunks), and split the demuxed payload on newlines
+ * (a line may span frames). Sanitize + parse severity once, here, so the client
+ * only renders clean text.
  */
 export async function GET(req: Request) {
   await requireAuth(req as never)
@@ -46,7 +48,6 @@ export async function GET(req: Request) {
         try { controller.close() } catch { /* already closed */ }
       }
 
-      // If the client disconnects, tear everything down.
       req.signal?.addEventListener("abort", close)
 
       if (!(await isDockerAvailable())) {
@@ -75,24 +76,50 @@ export async function GET(req: Request) {
             timestamps: true,
             tail: 200,
           })
-          let buf = ""
+
+          // Per-container demux state: pending = bytes not yet a complete frame;
+          // lineBuf = demuxed text not yet terminated by \n.
+          let pending = Buffer.alloc(0)
+          let lineBuf = ""
+
+          const onLine = (line: string) => {
+            // dockerode `.logs` with `timestamps` prefixes each line with an ISO
+            // timestamp; strip it before sanitizing + severity parsing.
+            const raw = sanitize(line.replace(/^\d{4}-\d{2}-\d{2}T[\d:.Z+-]+ /, ""))
+            if (!raw) return
+            send({
+              id: `log-${counter++}`,
+              ts: Date.now(),
+              level: severityOf(raw),
+              service: name,
+              message: raw.slice(0, 4000),
+            })
+          }
+
           const onData = (chunk: Buffer) => {
-            // dockerode multiplexed stream: 8-byte header per frame on stdout/stderr.
-            // The `.logs` stream with `timestamps` prefixes each line with an ISO timestamp.
-            buf += chunk.toString("utf8")
-            const lines = buf.split("\n")
-            buf = lines.pop() || ""
-            for (const line of lines) {
-              const raw = sanitizeLogLine(line.replace(/^\d{4}-\d{2}-\d{2}T[\d:.Z-]+ /, ""))
-              if (!raw) continue
-              send({
-                id: `log-${counter++}`,
-                ts: Date.now(),
-                level: "info",
-                service: name,
-                message: raw.slice(0, 4000),
-              })
+            pending = Buffer.concat([pending, chunk])
+            let text = ""
+            let off = 0
+            // demux complete frames; stop at the first incomplete one
+            if (pending.length >= 8) {
+              while (off + 8 <= pending.length) {
+                const len = pending.readUInt32BE(off + 4)
+                if (off + 8 + len > pending.length) break
+                text += pending.subarray(off + 8, off + 8 + len).toString("utf8")
+                off += 8 + len
+              }
+              pending = pending.subarray(off)
             }
+            // TTY streams have no framing — the whole buffer is payload
+            if (off === 0 && pending.length) {
+              text = pending.toString("utf8")
+              pending = pending.subarray(pending.length)
+            }
+            if (!text) return
+            lineBuf += text
+            const lines = lineBuf.split("\n")
+            lineBuf = lines.pop() ?? ""
+            for (const line of lines) onLine(line)
           }
           logStream.on("data", onData as never)
           logStream.on("error", () => {})

@@ -63,11 +63,70 @@ export function LogsView() {
   })
 
   const levelColor: Record<string, string> = {
+    critical: 'text-rose-600',
     info: 'text-emerald-500',
     warn: 'text-amber-500',
     error: 'text-rose-500',
     debug: 'text-sky-500',
     system: 'text-muted-foreground',
+  }
+
+  // ponytail: collapse a crash-loop into ONE row. Consecutive lines with the
+  // same service+level+message become a group with a ×N badge + the time span
+  // (first→last); click to expand and see the individual lines. This turns a
+  // 3-second Postgres PANIC spam into a single alarming "repeated 18×" item.
+  const [expanded, setExpanded] = React.useState<Set<string>>(new Set())
+  const grouped = React.useMemo(() => {
+    const out: Array<{
+      key: string
+      level: string
+      service: string
+      message: string
+      count: number
+      firstTs: string
+      lastTs: string
+      lines: typeof filtered
+    }> = []
+    for (const l of filtered) {
+      const last = out[out.length - 1]
+      if (
+        last &&
+        last.service === l.service &&
+        last.level === l.level &&
+        last.message === l.message
+      ) {
+        last.count++
+        last.lastTs = l.ts
+        last.lines.push(l)
+      } else {
+        out.push({
+          key: l.id,
+          level: l.level,
+          service: l.service,
+          message: l.message,
+          count: 1,
+          firstTs: l.ts,
+          lastTs: l.ts,
+          lines: [l],
+        })
+      }
+    }
+    return out
+  }, [filtered])
+
+  const toggleGroup = (key: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+
+  const timeSpan = (first: string, last: string) => {
+    const ms = new Date(last).getTime() - new Date(first).getTime()
+    if (ms < 1000) return `${ms}ms`
+    if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`
+    return `${(ms / 60000).toFixed(1)}m`
   }
 
   return (
@@ -151,15 +210,44 @@ export function LogsView() {
           <div>Service</div>
           <div>Message</div>
         </div>
-        {filtered.map((l) => (
-          <div key={l.id} className="log-line grid grid-cols-[80px_60px_120px_minmax(0,1fr)] gap-3 px-3 py-1 hover:bg-white/5">
-            <span className="text-muted-foreground/60 whitespace-nowrap tabular-nums">
-              {new Date(l.ts).toISOString().slice(11, 23)}
-            </span>
-            <span className={cn('uppercase font-medium whitespace-nowrap', levelColor[l.level])}>{l.level}</span>
-            <span className="text-muted-foreground/80 whitespace-nowrap">{l.service}</span>
-            <span className="min-w-0 whitespace-pre-wrap break-words [overflow-wrap:anywhere] [word-break:break-word]">{l.message}</span>
-          </div>
+        {grouped.map((g) => (
+          <React.Fragment key={g.key}>
+            <button
+              type="button"
+              onClick={() => g.count > 1 && toggleGroup(g.key)}
+              className={cn(
+                'log-line w-full text-left grid grid-cols-[80px_60px_120px_minmax(0,1fr)] gap-3 px-3 py-1 hover:bg-white/5',
+                g.level === 'critical' && 'bg-rose-500/10',
+                g.count === 1 && 'cursor-default',
+              )}
+            >
+              <span className="text-muted-foreground/60 whitespace-nowrap tabular-nums">
+                {new Date(g.firstTs).toISOString().slice(11, 23)}
+              </span>
+              <span className={cn('uppercase font-medium whitespace-nowrap', levelColor[g.level])}>{g.level}</span>
+              <span className="text-muted-foreground/80 whitespace-nowrap truncate" title={g.service}>{g.service}</span>
+              <span className="min-w-0 whitespace-pre-wrap break-words [overflow-wrap:anywhere] [word-break:break-word]">
+                {g.message}
+                {g.count > 1 && (
+                  <span className="ml-2 inline-flex items-center gap-1 align-middle text-[10px] font-mono px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-400 border border-rose-500/30">
+                    ×{g.count} <span className="text-muted-foreground/70">over {timeSpan(g.firstTs, g.lastTs)}</span>
+                    <span className="text-muted-foreground/50">{expanded.has(g.key) ? '▾' : '▸'}</span>
+                  </span>
+                )}
+              </span>
+            </button>
+            {g.count > 1 && expanded.has(g.key) && (
+              <div className="border-l-2 border-rose-500/30 ml-[80px]">
+                {g.lines.map((l) => (
+                  <div key={l.id} className="grid grid-cols-[60px_120px_minmax(0,1fr)] gap-3 px-3 py-0.5 text-[11px] text-muted-foreground/70">
+                    <span className="whitespace-nowrap tabular-nums">{new Date(l.ts).toISOString().slice(11, 23)}</span>
+                    <span className="whitespace-nowrap truncate">{l.service}</span>
+                    <span className="min-w-0 whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{l.message}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </React.Fragment>
         ))}
       </div>
 

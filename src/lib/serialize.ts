@@ -142,9 +142,11 @@ export function serializeDeployment(d: DeploymentRow, projectName?: string) {
         finishedAt: iso(s.finishedAt),
         durationMs: s.durationMs ?? undefined,
         logLines: s.logLines,
+        log: s.log ?? undefined,
       })),
     rollbackOfId: d.rollbackOfId ?? undefined,
     url: d.url ?? undefined,
+    error: d.error ?? undefined,
   }
 }
 

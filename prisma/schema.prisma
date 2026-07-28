@@ -178,6 +178,10 @@ model Deployment {
   durationMs    Int?
   rollbackOfId  String?
   url           String?
+  // ponytail: the real reason a deploy failed — the failing step's stderr tail
+  // mapped to a human cause + action (Bug 3). Empty on success. Surfaced in the
+  // deploy view instead of a generic "error".
+  error         String?
   project       Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
   steps         DeploymentStep[]
 
@@ -194,6 +198,9 @@ model DeploymentStep {
   finishedAt  DateTime?
   durationMs  Int?
   logLines    Int     @default(0)
+  // ponytail: the failing step's captured stdout/stderr tail (Bug 3). Null on
+  // success or for steps that didn't run.
+  log         String?
   order       Int     @default(0)
   deployment  Deployment @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
 
