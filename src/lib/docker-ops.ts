@@ -732,6 +732,10 @@ async function runPipeline(
       // verify: container is running
       await begin(9)
       if (containerId) {
+        // ponytail: same settle window as DB provision — Next.js / Node apps
+        // often bind a moment after start(); inspecting immediately falsely
+        // reported crash-loops that were still booting.
+        await sleep(2500)
         const c = docker.getContainer(containerId)
         const info = await c.inspect()
         const running = info.State?.Running === true
