@@ -31,10 +31,14 @@ services:
       SLIPWAY_BEHIND_PROXY: "true"
       SLIPWAY_CLUSTER_ID: helix-eu
       SLIPWAY_PUBLIC_HOST: "104.214.169.39"
+      SLIPWAY_TRAEFIK_DYNAMIC_DIR: /etc/dokploy/traefik/dynamic
       TZ: UTC
     volumes:
       - slipway-data:/data
       - /var/run/docker.sock:/var/run/docker.sock
+      # Bug 1: bind the host Traefik dynamic dir so Slipway's written
+      # app-<slug>-<id>.yml is the SAME file Dokploy's Traefik watches.
+      - /etc/dokploy/traefik/dynamic:/etc/dokploy/traefik/dynamic
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/"]
       interval: 30s
