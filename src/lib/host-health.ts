@@ -170,7 +170,7 @@ const RE_CLOUDFLARE = /2606:4700/i
 // watcher: `open /etc/dokploy/traefik/dynamic/app-<slug>-<id>.yml: no such file`
 const RE_WATCHER = /open\s+"?([^"]*?\b(app-[^"\/\s]+\.yml))"?\s*:\s*no such file/i
 
-function parseTraefikLogs(text: string): TraefikIssue[] {
+export function parseTraefikLogs(text: string): TraefikIssue[] {
   const out: TraefikIssue[] = []
   const seen = new Set<string>()
   const push = (iss: TraefikIssue) => {
@@ -423,7 +423,7 @@ export function diagnoseDeployError(text: string): DeployCause | null {
       cause: "Clone failed — the repo is private or the token is stale/mismatched.",
       action: "Confirm the repo is public as marked, or add a valid access token.",
     }
-  if (/no such file or directory.*?\.ya?ml|dynamic.*?config/i.test(t))
+  if (/no such file or directory.*?\.ya?ml|\.ya?ml.*?no such file|dynamic.*?config/i.test(t))
     return {
       cause: "Routing config for this app was not written (often disk-full or a rolled-back deploy).",
       action: "Re-deploy after freeing space; the Traefik dynamic file will be regenerated.",

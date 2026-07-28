@@ -36,7 +36,13 @@ ENV DATABASE_URL=file:/data/slipway.db
 # Next 16 App-Router routing under /api/auth/* (csrf/session/2fa all silently
 # 404 under `bun server.js`, work under `node server.js`). bun is kept only for
 # the prisma db push + TS seed step, which run fine under bun.
-RUN apk add --no-cache wget nodejs
+# docker-cli + docker-cli-compose: the deploy pipeline shells out to `docker
+# build` (git/folder context) and `docker compose up` via runCli(). Without the
+# CLI binary in the image those fail with `spawn docker ENOENT` — the runner
+# only has the socket (dockerode), not the client. The CLI talks to the host
+# daemon through the mounted /var/run/docker.sock (USER root), so `docker build
+# <git-url>` and `docker compose -f ... up -d` work for real, no fake success.
+RUN apk add --no-cache wget nodejs docker-cli docker-cli-compose
 
 # ponytail: run as root. The container mounts /var/run/docker.sock (root:root)
 # so slipway can orchestrate host containers via dockerode; a non-root user gets
