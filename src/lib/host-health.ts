@@ -433,6 +433,11 @@ export function diagnoseDeployError(text: string): DeployCause | null {
       cause: "The repository has no Dockerfile and Slipway could not generate one for its stack.",
       action: "Add a Dockerfile at the repo root, or use a Node/Next/Python/Go/static project Slipway can auto-build.",
     }
+  if (/--mount option requires BuildKit|BuildKit is enabled|legacy builder is deprecated/i.test(t))
+    return {
+      cause: "The Dockerfile needs BuildKit (e.g. RUN --mount=…) but the build ran on the legacy builder.",
+      action: "Slipway should build with DOCKER_BUILDKIT=1 / buildx. Rebuild the Slipway image so buildx is installed, then redeploy.",
+    }
   if (/no such file or directory.*?\.ya?ml|\.ya?ml.*?no such file|dynamic.*?config/i.test(t))
     return {
       cause: "Routing config for this app was not written (often disk-full or a rolled-back deploy).",
