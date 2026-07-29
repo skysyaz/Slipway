@@ -28,4 +28,10 @@ export interface DeployOptions {
   ssl?: boolean
   buildCmd?: string
   startCmd?: string
+  /** P4: changed paths from a push webhook (relative to repo root). */
+  changedPaths?: string[]
+  /** P4: force full rebuild regardless of changedPaths. */
+  forceAll?: boolean
+  /** P4: file list was truncated — treat as forceAll when smart monorepo is on. */
+  changedPathsTruncated?: boolean
 }

@@ -141,7 +141,8 @@ model Domain {
   ssl       String  @default("disabled") // managed | custom | pending | disabled
   sslExpiry DateTime?
   https     Boolean @default(false)
-  status    String  @default("pending") // active | pending | failed
+  // active | pending | failed | action-required (P1: app up, routing/TLS needs fix)
+  status    String  @default("pending")
   project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 }
 
@@ -189,6 +190,15 @@ model Deployment {
   // mapped to a human cause + action (Bug 3). Empty on success. Surfaced in the
   // deploy view instead of a generic "error".
   error         String?
+  // OpenShip P3: frozen build/start/port/env snapshot (JSON) for exact
+  // redeploy/rollback. Null when SLIPWAY_FF_DEPLOY_SNAPSHOT is off or legacy.
+  configSnapshot String?
+  // OpenShip P1: per-domain routing warnings (JSON string[]) — deploy stayed
+  // healthy; operator must fix DNS/proxy. Null when none.
+  routeWarnings  String?
+  // OpenShip P4: changed paths for this deploy (JSON string[]), when known.
+  changedPaths   String?
+  forceAll       Boolean @default(false)
   project       Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
   steps         DeploymentStep[]
 

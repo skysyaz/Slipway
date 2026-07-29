@@ -52,6 +52,8 @@ export const PATCH = route(async (req, params, auth) => {
     "repoUrl",
     "folderPath",
     "composePath",
+    "monorepo",
+    "monorepoPath",
   ]
   const data: Record<string, unknown> = {}
   for (const k of allowed) {

@@ -3,6 +3,8 @@
  * expects (src/lib/slipway/types.ts). Keeps view components unchanged.
  */
 import type { Prisma } from "@prisma/client"
+import { snapshotForApi } from "./deploy-snapshot"
+import { parseRouteWarnings } from "./route-after-deploy"
 
 type ProjectRow = Prisma.ProjectGetPayload<{
   include: {
@@ -147,6 +149,24 @@ export function serializeDeployment(d: DeploymentRow, projectName?: string) {
     rollbackOfId: d.rollbackOfId ?? undefined,
     url: d.url ?? undefined,
     error: d.error ?? undefined,
+    // OpenShip P1/P3/P4 fields — scrubbed snapshot; warnings as string[]
+    routeWarnings: (() => {
+      const raw = (d as { routeWarnings?: string | null }).routeWarnings
+      const list = parseRouteWarnings(raw)
+      return list.length ? list : undefined
+    })(),
+    configSnapshot: snapshotForApi((d as { configSnapshot?: string | null }).configSnapshot),
+    changedPaths: (() => {
+      try {
+        const raw = (d as { changedPaths?: string | null }).changedPaths
+        if (!raw) return undefined
+        const v = JSON.parse(raw)
+        return Array.isArray(v) ? v.map(String) : undefined
+      } catch {
+        return undefined
+      }
+    })(),
+    forceAll: Boolean((d as { forceAll?: boolean }).forceAll),
   }
 }
 

@@ -136,6 +136,7 @@ export function StatusDot({ status }: { status: string }) {
     restarting: { color: 'oklch(0.78 0.16 70)', label: 'Restarting', pulse: true },
     warning: { color: 'oklch(0.78 0.16 70)', label: 'Warning' },
     pending: { color: 'oklch(0.78 0.16 70)', label: 'Pending' },
+    'action-required': { color: 'oklch(0.78 0.16 70)', label: 'Action required' },
     failed: { color: 'oklch(0.65 0.22 25)', label: 'Failed' },
     rolled_back: { color: 'oklch(0.6 0.06 280)', label: 'Rolled back' },
     offline: { color: 'oklch(0.55 0.02 240)', label: 'Offline' },

@@ -39,12 +39,31 @@ export function CliDesktopView() {
       </div>
 
       {/* Honest scope note */}
-      <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 text-[12px] text-muted-foreground leading-relaxed">
-        <strong className="text-foreground font-medium">What this build ships:</strong> the Slipway server, web dashboard,
-        and REST API (including Bearer-token auth for automation). The standalone CLI binary and the Tauri desktop app
-        are <strong className="text-foreground font-medium">not bundled</strong> with this self-hosted build — the install
-        commands and download buttons below describe the intended distribution, not files that exist today. Drive Slipway
-        from the web dashboard, or call the API directly with an API token (see Settings → Profile → API tokens).
+      <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 text-[12px] text-muted-foreground leading-relaxed space-y-2">
+        <p>
+          <strong className="text-foreground font-medium">What this build ships:</strong> the Slipway server, web dashboard,
+          and REST API (including Bearer-token auth for automation). The standalone CLI binary and the Tauri desktop app
+          are <strong className="text-foreground font-medium">not bundled</strong> with this self-hosted build — the install
+          commands and download buttons below describe the intended distribution, not files that exist today.
+        </p>
+        <p>
+          <strong className="text-foreground font-medium">Drive Slipway today:</strong> use this dashboard, call the API with
+          an API token (Settings → Profile → API tokens), or point CI at{' '}
+          <code className="font-mono text-[11px]">POST /api/git/webhook</code> for push-to-deploy. Host install/upgrade
+          remains <code className="font-mono text-[11px]">install.sh</code> on the server (proxy + domain + password) — there
+          is no separate always-on &quot;bare mode&quot; control plane like Openship&apos;s desktop/CLI wizard.
+        </p>
+      </div>
+
+      <div className="rounded-xl border border-border bg-card p-4 space-y-2">
+        <div className="text-[13px] font-medium">Push-to-deploy (API)</div>
+        <p className="text-[12px] text-muted-foreground leading-relaxed">
+          From CI or a git hook, POST a Bearer token with deploy scope:
+        </p>
+        <pre className="text-[11px] font-mono bg-muted/40 rounded-lg p-3 overflow-x-auto whitespace-pre-wrap">{`curl -X POST "$SLIPWAY_URL/api/git/webhook" \\
+  -H "Authorization: Bearer slipway_…" \\
+  -H "Content-Type: application/json" \\
+  -d '{"projectId":"<id>","branch":"main","changedPaths":["apps/web/page.tsx"]}'`}</pre>
       </div>
 
       {/* Three clients banner */}

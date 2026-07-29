@@ -124,6 +124,13 @@ export interface Deployment {
   rollbackOfId?: string
   url?: string
   error?: string
+  /** P1: per-domain routing warnings; deploy stayed healthy. */
+  routeWarnings?: string[]
+  /** P3: scrubbed frozen config snapshot. */
+  configSnapshot?: unknown
+  /** P4: paths that triggered this deploy. */
+  changedPaths?: string[]
+  forceAll?: boolean
 }
 
 export interface EnvVar {
@@ -200,7 +207,7 @@ export interface Domain {
   ssl: 'managed' | 'custom' | 'pending' | 'disabled'
   sslExpiry?: string
   https: boolean
-  status: 'active' | 'pending' | 'failed'
+  status: 'active' | 'pending' | 'failed' | 'action-required'
 }
 
 export interface DatabaseInstance {

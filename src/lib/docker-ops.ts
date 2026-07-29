@@ -46,8 +46,26 @@ import {
   defaultPortFor,
   type DetectedStack,
 } from "./git-deploy"
-import { encryptSecret, decryptSecret } from "./security"
+import { encryptSecret, decryptSecret, execFormArgv, hasShellMetachars } from "./security"
 import type { DeployOptions } from "./simulate"
+import { FF } from "./feature-flags"
+import { detectStackDetailed } from "./stack-detect"
+import {
+  buildDeploySnapshot,
+  serializeSnapshot,
+  parseSnapshot,
+} from "./deploy-snapshot"
+import {
+  domainStatusAfterRoute,
+  formatRouteWarning,
+  serializeRouteWarnings,
+} from "./route-after-deploy"
+import { writeDomainRoute } from "./routing"
+import { validIp } from "./security"
+import {
+  classifyPushChanges,
+  shouldSkipMonorepoRebuild,
+} from "./changed-files"
 
 const STAGES = [
   "queued",
@@ -340,6 +358,54 @@ async function setStep(deploymentId: string, order: number, status: string) {
   })
 }
 
+/**
+ * P1: After the app container is healthy, best-effort rewrite every project
+ * domain's Traefik route. Failures become action-required warnings — they
+ * NEVER fail the deploy (OpenShip route-registration semantics).
+ */
+async function rewireProjectDomainsAfterDeploy(
+  projectId: string,
+  projectSlug: string,
+  hostPort: number | null | undefined
+): Promise<string[]> {
+  const warnings: string[] = []
+  const domains = await db.domain.findMany({ where: { projectId } })
+  if (domains.length === 0) return warnings
+  const targetPort = hostPort && hostPort > 0 ? hostPort : 3000
+  for (const d of domains) {
+    const hostnameIsIp = validIp(d.hostname)
+    const tlsMode: "letsencrypt" | "selfsigned" | "http" =
+      d.ssl === "disabled" || !d.https
+        ? "http"
+        : hostnameIsIp || d.ssl === "custom"
+          ? "selfsigned"
+          : "letsencrypt"
+    try {
+      await writeDomainRoute({
+        projectSlug,
+        projectId,
+        hostname: d.hostname,
+        targetPort,
+        tls: tlsMode,
+      })
+      const next = domainStatusAfterRoute({ routed: true, tlsMode })
+      // Don't downgrade an already-active managed cert back to pending on every
+      // redeploy — only leave pending if it was still waiting.
+      const status =
+        tlsMode === "letsencrypt" && d.status === "active" ? "active" : next
+      await db.domain.update({ where: { id: d.id }, data: { status } })
+    } catch (e) {
+      const msg = (e as Error).message || "routing failed"
+      warnings.push(formatRouteWarning(d.hostname, msg))
+      await db.domain.update({
+        where: { id: d.id },
+        data: { status: "action-required" },
+      })
+    }
+  }
+  return warnings
+}
+
 export async function realDeploy(
   projectId: string,
   opts: DeployOptions,
@@ -377,6 +443,45 @@ export async function realDeploy(
     startedAt: i === 0 ? new Date() : null,
     finishedAt: i === 0 ? new Date() : null,
   }))
+
+  // P3: freeze resolved config onto the deployment row (flag-gated).
+  let configSnapshot: string | null = null
+  if (FF.deploySnapshot()) {
+    const withEnv = await db.project.findUnique({
+      where: { id: projectId },
+      include: { envVars: true },
+    })
+    if (withEnv) {
+      configSnapshot = serializeSnapshot(
+        buildDeploySnapshot(withEnv, {
+          branch,
+          source: opts.source || project.source,
+          repoUrl: opts.repoUrl || project.repoUrl || undefined,
+          buildCmd: opts.buildCmd || project.buildCmd || undefined,
+          startCmd: opts.startCmd || project.startCmd || undefined,
+          stack: opts.stack || project.stack || undefined,
+        })
+      )
+    }
+  }
+
+  // P4: persist changed-path metadata when smart monorepo is on.
+  const forceAll =
+    Boolean(opts.forceAll) ||
+    Boolean(opts.changedPathsTruncated) ||
+    (FF.smartMonorepo() &&
+      opts.changedPaths &&
+      classifyPushChanges({
+        files: opts.changedPaths,
+        truncated: opts.changedPathsTruncated,
+        headMessage: opts.commitMessage,
+        isMonorepo: project.monorepo,
+      }).forceAll)
+  const changedPathsJson =
+    FF.smartMonorepo() && opts.changedPaths?.length
+      ? JSON.stringify(opts.changedPaths.slice(0, 500))
+      : null
+
   const deployment = await db.deployment.create({
     data: {
       projectId,
@@ -386,6 +491,9 @@ export async function realDeploy(
       author: actor,
       environment: opts.environment || project.environment,
       status: "building",
+      ...(configSnapshot ? { configSnapshot } : {}),
+      ...(changedPathsJson ? { changedPaths: changedPathsJson } : {}),
+      forceAll: Boolean(forceAll),
       steps: { create: steps },
     },
   })
@@ -407,6 +515,7 @@ export async function realDeploy(
     buildCmd: opts.buildCmd || project.buildCmd || undefined,
     startCmd: opts.startCmd || project.startCmd || undefined,
     branch,
+    forceAll: Boolean(forceAll),
   }
   runPipeline(deployment.id, projectId, project.slug, project.name, {
     isImageSource,
@@ -475,6 +584,64 @@ async function runPipeline(
           log: reason.slice(0, 500),
         },
       })
+    }
+
+    // P3: this deployment's frozen snapshot is the source of truth for
+    // build/start/stack — not the live Project row (which may have drifted).
+    if (FF.deploySnapshot()) {
+      const depRow = await db.deployment.findUnique({
+        where: { id: deploymentId },
+        select: { configSnapshot: true },
+      })
+      const snap = parseSnapshot(depRow?.configSnapshot)
+      if (snap) {
+        if (snap.buildCmd !== undefined) ctx.opts.buildCmd = snap.buildCmd || undefined
+        if (snap.startCmd !== undefined) ctx.opts.startCmd = snap.startCmd || undefined
+        if (snap.stack) ctx.opts.stack = snap.stack
+      }
+    }
+
+    // P4: skip full rebuild when monorepo path was untouched by this push.
+    if (FF.smartMonorepo() && ctx.opts.changedPaths?.length && !ctx.opts.forceAll) {
+      const proj = await db.project.findUnique({ where: { id: projectId } })
+      if (proj?.monorepo && proj.monorepoPath) {
+        const decision = shouldSkipMonorepoRebuild({
+          monorepoPath: proj.monorepoPath,
+          files: ctx.opts.changedPaths,
+          forceAll: ctx.opts.forceAll,
+        })
+        if (decision.skip) {
+          for (let i = 1; i <= 10; i++) {
+            await skip(i, `skipped — monorepo path untouched (${decision.reason})`)
+          }
+          await db.deployment.update({
+            where: { id: deploymentId },
+            data: {
+              status: "healthy",
+              finishedAt: new Date(),
+              durationMs: Date.now() - pipelineStart,
+              error: null,
+            },
+          })
+          await db.project.update({
+            where: { id: projectId },
+            data: { status: "running", lastDeployedAt: new Date() },
+          })
+          await emit(
+            "deploy.success",
+            "deploy",
+            `skipped rebuild of ${projectName} — monorepo path untouched`,
+            {
+              title: "Deploy skipped",
+              body: `${projectName}: no files under ${proj.monorepoPath} changed; left the running container as-is.`,
+              level: "success",
+              kind: "deploy",
+            },
+            { projectId, actor: ctx.actor }
+          )
+          return
+        }
+      }
     }
 
     let image = ctx.image
@@ -552,10 +719,24 @@ async function runPipeline(
         // detect stack + ensure Dockerfile
         await begin(2)
         const files = await listCheckoutFiles(workDir)
-        let stack: DetectedStack = detectStackFromFiles(files)
-        if (stack === "node") {
-          const pkg = await readTextFile(`${workDir}/package.json`)
-          stack = refineNodeStack(pkg)
+        let stack: DetectedStack
+        let detectLog = ""
+        if (FF.stackDetect()) {
+          const pkg = (await readTextFile(`${workDir}/package.json`)) || undefined
+          const detailed = detectStackDetailed({
+            files,
+            fileContents: pkg ? { "package.json": pkg } : undefined,
+          })
+          stack = detailed.stack
+          if (!ctx.opts.buildCmd && detailed.buildCommand) ctx.opts.buildCmd = detailed.buildCommand
+          if (!ctx.opts.startCmd && detailed.startCommand) ctx.opts.startCmd = detailed.startCommand
+          detectLog = `Detected ${detailed.framework} (${detailed.packageManager}, port ${detailed.port}, confidence ${detailed.confidence}).`
+        } else {
+          stack = detectStackFromFiles(files)
+          if (stack === "node") {
+            const pkg = await readTextFile(`${workDir}/package.json`)
+            stack = refineNodeStack(pkg)
+          }
         }
         let dfName = findDockerfile(files)
         let dfText = dfName ? (await readTextFile(`${workDir}/${dfName}`)) || "" : ""
@@ -581,8 +762,13 @@ async function runPipeline(
           await db.deploymentStep.updateMany({
             where: { deploymentId, order: 2 },
             data: {
-              log: `Detected ${stack}; generated Dockerfile (repo had none).`,
+              log: `${detectLog} Generated Dockerfile (repo had none).`.trim() || `Detected ${stack}; generated Dockerfile (repo had none).`,
             },
+          })
+        } else if (detectLog) {
+          await db.deploymentStep.updateMany({
+            where: { deploymentId, order: 2 },
+            data: { log: detectLog },
           })
         }
         appPort = parseExposePort(dfText) || defaultPortFor(stack)
@@ -635,9 +821,21 @@ async function runPipeline(
 
         await begin(2)
         const files = await listCheckoutFiles(folder)
-        let stack: DetectedStack = detectStackFromFiles(files)
-        if (stack === "node") {
-          stack = refineNodeStack(await readTextFile(`${folder}/package.json`))
+        let stack: DetectedStack
+        if (FF.stackDetect()) {
+          const pkg = (await readTextFile(`${folder}/package.json`)) || undefined
+          const detailed = detectStackDetailed({
+            files,
+            fileContents: pkg ? { "package.json": pkg } : undefined,
+          })
+          stack = detailed.stack
+          if (!ctx.opts.buildCmd && detailed.buildCommand) ctx.opts.buildCmd = detailed.buildCommand
+          if (!ctx.opts.startCmd && detailed.startCommand) ctx.opts.startCmd = detailed.startCommand
+        } else {
+          stack = detectStackFromFiles(files)
+          if (stack === "node") {
+            stack = refineNodeStack(await readTextFile(`${folder}/package.json`))
+          }
         }
         let dfName = findDockerfile(files)
         let dfText = dfName ? (await readTextFile(`${folder}/${dfName}`)) || "" : ""
@@ -756,6 +954,21 @@ async function runPipeline(
               data: { port: hostPort },
             })
           }
+          // P3: stamp the resolved host port onto the frozen snapshot once known.
+          if (FF.deploySnapshot()) {
+            const depRow = await db.deployment.findUnique({
+              where: { id: deploymentId },
+              select: { configSnapshot: true },
+            })
+            const snap = parseSnapshot(depRow?.configSnapshot)
+            if (snap) {
+              snap.port = hostPort
+              await db.deployment.update({
+                where: { id: deploymentId },
+                data: { configSnapshot: serializeSnapshot(snap) },
+              })
+            }
+          }
         } catch (re) {
           await failStep(8, ((re as Error).message || "").trim())
           throw re
@@ -792,8 +1005,29 @@ async function runPipeline(
       }
       await finish(9)
 
-      // live
+      // live — P1: rewire domains AFTER the app is healthy; never fail deploy on routing.
       await begin(10)
+      let routeWarnings: string[] = []
+      if (FF.routeAfterDeploy()) {
+        // Prefer the published host port from the app service row (Traefik → 127.0.0.1:hostPort).
+        const appSvc = await db.service.findFirst({
+          where: { projectId, kind: "app" },
+          select: { port: true },
+        })
+        routeWarnings = await rewireProjectDomainsAfterDeploy(
+          projectId,
+          projectSlug,
+          appSvc?.port ?? appPort
+        )
+        if (routeWarnings.length) {
+          await db.deploymentStep.updateMany({
+            where: { deploymentId, order: 10 },
+            data: {
+              log: `App is live. Routing action required:\n${routeWarnings.join("\n")}`.slice(0, 1200),
+            },
+          })
+        }
+      }
       await finish(10)
 
       await db.deployment.update({
@@ -803,17 +1037,29 @@ async function runPipeline(
           finishedAt: new Date(),
           durationMs: Date.now() - pipelineStart,
           image: image || null,
+          ...(routeWarnings.length
+            ? { routeWarnings: serializeRouteWarnings(routeWarnings) }
+            : { routeWarnings: null }),
         },
       })
       await db.project.update({
         where: { id: projectId },
         data: { status: "running", lastDeployedAt: new Date(), monthlyDeploys: { increment: 1 } },
       })
+      const bodyExtra =
+        routeWarnings.length > 0
+          ? ` App is up; routing needs attention: ${routeWarnings[0]}`
+          : ""
       await emit(
         "deploy.success",
         "deploy",
         `deployed ${projectName} to ${ctx.opts.environment || "production"}`,
-        { title: "Deployment complete", body: `${projectName} is live via Docker.`, level: "success", kind: "deploy" },
+        {
+          title: routeWarnings.length ? "Deployed — action required" : "Deployment complete",
+          body: `${projectName} is live via Docker.${bodyExtra}`,
+          level: routeWarnings.length ? "warning" : "success",
+          kind: "deploy",
+        },
         { projectId, actor: ctx.actor }
       )
     } finally {
@@ -1533,6 +1779,11 @@ export async function realRollback(deploymentId: string, actor = "you"): Promise
       rollbackOfId: target.id,
       image: target.image,
       url: project.url || undefined,
+      // P3: carry the frozen snapshot forward so the rollback record shows
+      // exactly which build/start/env shipped with that image.
+      ...(FF.deploySnapshot() && target.configSnapshot
+        ? { configSnapshot: target.configSnapshot }
+        : {}),
       steps: {
         create: steps.map((s) => ({ ...s, status: "queued", startedAt: null, finishedAt: null })),
       },
@@ -1587,6 +1838,36 @@ export async function realRollback(deploymentId: string, actor = "you"): Promise
     }
 
     const cfg = await containerConfigFor(project.id)
+    // P3: when rolling back to a deployment that froze startCmd/env, prefer that
+    // over the live Project row so we re-run exactly what shipped.
+    if (FF.deploySnapshot()) {
+      const snap = parseSnapshot(target.configSnapshot)
+      if (snap?.startCmd) {
+        if (hasShellMetachars(snap.startCmd)) {
+          throw new Error(
+            `Frozen startCmd on that deployment contains shell metacharacters — refusing to roll back with an unsafe command. Redeploy from source instead.`
+          )
+        }
+        cfg.Cmd = execFormArgv(snap.startCmd)
+      }
+      if (snap?.env && Object.keys(snap.env).length) {
+        const encrypted = new Set(snap.encryptedEnvKeys || [])
+        // Snapshot env overlays (and replaces keys present on the live project).
+        const envFromSnap: string[] = []
+        for (const [k, v] of Object.entries(snap.env)) {
+          let plain = v
+          if (encrypted.has(k)) {
+            try {
+              plain = decryptSecret(v)
+            } catch {
+              continue
+            }
+          }
+          envFromSnap.push(`${k}=${plain}`)
+        }
+        if (envFromSnap.length) cfg.Env = envFromSnap
+      }
+    }
     const envMap = new Map<string, string>()
     for (const e of info.Config.Env || []) {
       const i = e.indexOf("=")
@@ -1736,11 +2017,28 @@ export async function realRollback(deploymentId: string, actor = "you"): Promise
     await finish(2)
 
     await begin(3)
+    let routeWarnings: string[] = []
+    if (FF.routeAfterDeploy()) {
+      const appSvc = await db.service.findFirst({
+        where: { projectId: project.id, kind: "app" },
+        select: { port: true },
+      })
+      routeWarnings = await rewireProjectDomainsAfterDeploy(
+        project.id,
+        project.slug,
+        appSvc?.port
+      )
+    }
     await finish(3)
 
     await db.deployment.update({
       where: { id: rollback.id },
-      data: { status: "healthy", finishedAt: new Date(), durationMs: Date.now() - startedAt },
+      data: {
+        status: "healthy",
+        finishedAt: new Date(),
+        durationMs: Date.now() - startedAt,
+        ...(routeWarnings.length ? { routeWarnings: serializeRouteWarnings(routeWarnings) } : {}),
+      },
     })
     await emit(
       "rollback",
@@ -1748,8 +2046,10 @@ export async function realRollback(deploymentId: string, actor = "you"): Promise
       `rolled back ${project.name} to ${target.commitSha || target.image}`,
       {
         title: "Rollback complete",
-        body: `${project.name} is running ${target.image} again.`,
-        level: "success",
+        body: routeWarnings.length
+          ? `${project.name} is running ${target.image} again. Routing action required: ${routeWarnings[0]}`
+          : `${project.name} is running ${target.image} again.`,
+        level: routeWarnings.length ? "warning" : "success",
         kind: "deploy",
       },
       { projectId: project.id, actor }

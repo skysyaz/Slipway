@@ -40,20 +40,17 @@ export function PreviewsView() {
           <GitPullRequest size={16} className="text-primary" />
         </div>
         <div className="flex-1">
-          {/* ponytail: describe what this build ACTUALLY does. The banner used
-              to promise "Slipway builds a disposable preview environment on
-              every pull request — full app, isolated database, wildcard SSL"
-              and "auto-cleanup after PR close". None of it exists: there is no
-              inbound git webhook endpoint anywhere in the codebase, so nothing
-              can react to a PR being opened or closed. Previews are real
-              projects tagged `preview`, created here or via the API. */}
+          {/* ponytail: push-to-deploy exists (POST /api/git/webhook) but there is
+              still no PR open/close handler — previews remain manually created
+              projects tagged `preview`. */}
           <div className="text-[13px] font-semibold">Preview environments</div>
           <p className="text-[12px] text-muted-foreground mt-0.5 leading-relaxed">
             A preview is a normal Slipway project tagged{' '}
             <code className="font-mono text-[11px]">preview</code> — its own container, domain and env vars, isolated
             from production. Create one below or through the API, and delete it when the branch is done.{' '}
             <strong className="text-foreground font-medium">Automatic per-PR previews aren&apos;t wired up:</strong>{' '}
-            Slipway has no inbound git webhook, so nothing reacts to a pull request opening or closing yet.
+            <code className="font-mono text-[11px]">POST /api/git/webhook</code> handles push deploys, but nothing yet
+            reacts to a pull request opening or closing.
           </p>
         </div>
       </div>

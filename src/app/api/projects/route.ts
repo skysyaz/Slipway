@@ -67,6 +67,8 @@ export const POST = route(async (req) => {
           cpuMilli: Number(body.cpuMilli || 400),
           replicas: Number(body.replicas || 1),
           dockerImage: body.dockerImage ?? body.image ?? null,
+          monorepo: Boolean(body.monorepo),
+          monorepoPath: body.monorepoPath != null ? String(body.monorepoPath) : null,
           buildCmd: body.buildCmd ?? null,
           startCmd: body.startCmd ?? null,
         },

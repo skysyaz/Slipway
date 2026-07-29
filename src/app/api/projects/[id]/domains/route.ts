@@ -5,6 +5,9 @@ import { emit } from "@/lib/notify"
 import { writeDomainRoute, isPrivateIp } from "@/lib/routing"
 import { validIp } from "@/lib/security"
 
+import { domainStatusAfterRoute } from "@/lib/route-after-deploy"
+import { FF } from "@/lib/feature-flags"
+
 export const dynamic = "force-dynamic"
 
 const INCLUDE = { services: true, domains: true, envVars: true } as const
@@ -95,8 +98,17 @@ export const POST = route(async (req, params, auth) => {
 
   await db.domain.update({
     where: { id: domain.id },
-    // selfsigned/http land as active (no cert to wait on); only ACME stays pending.
-    data: { status: routed ? (tlsMode === "letsencrypt" ? "pending" : "active") : "failed" },
+    // P1 (flag ON): route failure → action-required. Flag OFF restores pre-port
+    // "failed" so SLIPWAY_FF_ROUTE_AFTER_DEPLOY=0 is bit-for-bit for this path.
+    data: {
+      status: FF.routeAfterDeploy()
+        ? domainStatusAfterRoute({ routed, tlsMode })
+        : routed
+          ? tlsMode === "letsencrypt"
+            ? "pending"
+            : "active"
+          : "failed",
+    },
   })
 
   await emit(
@@ -111,7 +123,7 @@ export const POST = route(async (req, params, auth) => {
           : tlsMode === "selfsigned"
             ? `${hostname} routed via Traefik with a self-signed cert (browsers will warn).`
             : `${hostname} routed via Traefik over plain HTTP (not encrypted).`
-        : `${hostname} recorded, but the Traefik route could not be written (${routeError || "routing dir unavailable"}). Reconcile after the proxy dir is mounted.`,
+        : `${hostname} recorded, but the Traefik route could not be written (${routeError || "routing dir unavailable"}). Action required — fix the proxy mount and retry; the app is not taken down.`,
       level: routed ? "success" : "error",
       kind: "ssl",
     },
