@@ -25,9 +25,22 @@ export const authOptions: NextAuthOptions = {
   session: { strategy: "jwt", maxAge: 60 * 60 * 24 * 7 }, // 7 days
   // R4: NO hardcoded session secret. A committed literal lets anyone who can
   // read this repo forge sessions and take over the dashboard (and via it the
-  // host Docker socket). resolveJwtSecret() requires the env in production
-  // (throws at boot) and only generates an ephemeral value in dev.
-  secret: resolveJwtSecret(),
+  // host Docker socket). resolveJwtSecret() requires the env in production and
+  // only generates an ephemeral value in dev.
+  //
+  // ponytail: a GETTER, not a call at module scope. Evaluating it eagerly threw
+  // during `next build` — Next imports every route to collect page data, with
+  // NODE_ENV=production and no runtime env, so the build died with
+  //   Failed to collect page data for /api/auth/[...nextauth]
+  //   NEXTAUTH_SECRET is not set — refusing to boot…
+  // That also broke `docker build`: the Dockerfile sets NEXTAUTH_SECRET in the
+  // RUNNER stage, while `bun run build` runs in the BUILDER stage, which has
+  // none. Compiling is not booting. NextAuth reads `.secret` while handling a
+  // request, so the guard still fails closed at runtime — where it belongs —
+  // and a build no longer needs production secrets to exist.
+  get secret() {
+    return resolveJwtSecret()
+  },
   pages: { signIn: "/" }, // custom login view at "/"
   providers: [
     CredentialsProvider({

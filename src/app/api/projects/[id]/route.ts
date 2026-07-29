@@ -3,6 +3,7 @@ import { db } from "@/lib/db"
 import { serializeProject } from "@/lib/serialize"
 import { stopProject, removeProject, updateContainer } from "@/lib/ops"
 import { recordActivity } from "@/lib/notify"
+import { normalizeGitSource } from "@/lib/git-deploy"
 
 export const dynamic = "force-dynamic"
 
@@ -43,11 +44,35 @@ export const PATCH = route(async (req, params, auth) => {
     "startCmd",
     "dockerImage",
     "paused",
+    // ponytail: the SOURCE fields were missing from this list, so a project's
+    // repository could never be changed after creation — a project saved with
+    // the wrong URL (or none) was permanently unbuildable with no way to fix it
+    // from the UI or the API.
+    "source",
+    "repoUrl",
+    "folderPath",
+    "composePath",
   ]
   const data: Record<string, unknown> = {}
   for (const k of allowed) {
     if (k in body) data[k] = body[k]
   }
+  // Validate a repository URL up front rather than letting the next deploy fail
+  // at checkout with a git error. Uses the same normaliser POST /api/projects
+  // uses, so a URL edited here and one entered at creation are stored alike.
+  if (typeof data.repoUrl === "string" && data.repoUrl.trim()) {
+    const git = normalizeGitSource(String(data.repoUrl))
+    if (!git) {
+      return new Response(
+        JSON.stringify({
+          error: `Not a usable git URL: "${data.repoUrl}". Use github.com/org/repo or a full https:// URL.`,
+        }),
+        { status: 400 }
+      )
+    }
+    data.repoUrl = `https://${git.host}/${git.owner}/${git.repo}`
+  }
+
   if (data.slug && data.slug !== existing.slug) {
     if (await db.project.findUnique({ where: { slug: String(data.slug) } })) {
       return new Response(JSON.stringify({ error: "Slug already in use" }), { status: 409 })

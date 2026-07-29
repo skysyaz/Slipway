@@ -3,13 +3,20 @@
  * cover them without a DB, Docker socket, or network. Every dangerous sink
  * gets ONE named helper (META-RULE 5/6/7), and every fix routes through it.
  */
+import { isIpLiteral } from "./ip"
 import { createHash, randomBytes, createCipheriv, createDecipheriv } from "node:crypto"
-import net from "node:net"
 
 /* ── R5 IP validation (never ^(\d{1,3}\.) — that matches 999.999.999.999) ── */
+/**
+ * ponytail: was `net.isIP`, but this module is imported by a CLIENT component
+ * (project-detail.tsx uses validIp), which forced `node:net` into the browser
+ * bundle and broke `next build` entirely:
+ *   the chunking context (unknown) does not support external modules
+ *   (request: node:net)
+ * src/lib/ip.ts is a pure equivalent, differential-tested against the builtin.
+ */
 export function validIp(host: string): boolean {
-  const h = String(host || "").trim()
-  return net.isIP(h) !== 0
+  return isIpLiteral(host)
 }
 
 export function isPrivateIp(host: string): boolean {

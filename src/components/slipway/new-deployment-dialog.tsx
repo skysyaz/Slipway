@@ -56,10 +56,15 @@ export function NewDeploymentDialog() {
 
   const [step, setStep] = React.useState(0)
   const [source, setSource] = React.useState<Source>('git')
-  const [repoUrl, setRepoUrl] = React.useState('https://github.com/')
-  const [branch, setBranch] = React.useState('main')
-  const [folderPath, setFolderPath] = React.useState('/srv/projects/web')
-  const [composePath, setComposePath] = React.useState('/srv/projects/legacy-crm/docker-compose.yml')
+  // ponytail: start these EMPTY. They were prefilled with plausible-looking
+  // fakes — 'github.com/helixco/web', '/srv/projects/web' — which are not
+  // placeholder text but real initial values, so clicking through the wizard
+  // saved a repository that doesn't exist and the project could never build.
+  // The `placeholder` attribute is what shows an example without submitting it.
+  const [repoUrl, setRepoUrl] = React.useState('')
+  const [branch, setBranch] = React.useState('')
+  const [folderPath, setFolderPath] = React.useState('')
+  const [composePath, setComposePath] = React.useState('')
   const [env, setEnv] = React.useState<'production' | 'staging' | 'preview'>('production')
   const [autoDetect, setAutoDetect] = React.useState(true)
   const [detectedIdx, setDetectedIdx] = React.useState(0)
@@ -349,7 +354,11 @@ function SourceStep(props: any) {
               placeholder="https://github.com/org/repo"
               className="font-mono text-[13px]"
             />
-            <p className="text-[11px] text-muted-foreground">HTTPS or SSH. Slipway also auto-installs deploy keys if needed.</p>
+            <p className="text-[11px] text-muted-foreground">
+              Public repositories only — Slipway holds no credentials, so a private repo can&apos;t be cloned. Paste the
+              address bar, the clone URL, or <span className="font-mono">owner/repo</span>; a{' '}
+              <span className="font-mono">/tree/branch</span> link sets the branch too.
+            </p>
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="branch">Branch</Label>
@@ -357,8 +366,13 @@ function SourceStep(props: any) {
               id="branch"
               value={props.branch}
               onChange={(e) => props.setBranch(e.target.value)}
+              placeholder="default"
               className="font-mono text-[13px]"
             />
+            {/* ponytail: blank means "whatever the repo's default branch is".
+                This used to default to "main", which fails outright on every
+                repository still using master. */}
+            <p className="text-[11px] text-muted-foreground">Leave blank to use the repository default.</p>
           </div>
         </div>
       )}

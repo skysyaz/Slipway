@@ -466,8 +466,9 @@ check("scrub: redacts registry auth, jwt, password fields by default", () => {
   const reg = [{ name: "ghcr", url: "ghcr.io", auth: "dXNlcjpwYXNzd29yZDEyMzQ1Njc4" }]
   const out = scrub(reg) as { auth: string }[]
   assert.equal(out[0].auth, SEC_REDACTED)
-  assert.equal(scrub({ jwt: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.sig" })["jwt"], SEC_REDACTED)
-  assert.equal(scrub({ url: "https://ok" })["url"], "https://ok")
+  const rec = (v: unknown) => scrub(v) as Record<string, unknown>
+  assert.equal(rec({ jwt: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.sig" })["jwt"], SEC_REDACTED)
+  assert.equal(rec({ url: "https://ok" })["url"], "https://ok")
 })
 
 check("encrypt/decrypt secret: round-trips, ciphertext never contains plaintext", () => {
@@ -513,9 +514,9 @@ check("deriveCertStatus: custom (self-signed) cert shows Self-signed, never pend
 })
 
 check("deriveCertStatus: pending -> stuck after timeout; active is HTTPS; http for plain", () => {
-  const fresh = deriveCertStatus({ hostname: "app.example.com", ssl: "managed", status: "pending", https: true, createdAt: Date.now() - 60_000 })
+  const fresh = deriveCertStatus({ hostname: "app.example.com", ssl: "managed", status: "pending", https: true, createdAt: new Date(Date.now() - 60_000) })
   assert.equal(fresh.state, "pending")
-  const old = deriveCertStatus({ hostname: "app.example.com", ssl: "managed", status: "pending", https: true, createdAt: Date.now() - 20 * 60 * 1000 })
+  const old = deriveCertStatus({ hostname: "app.example.com", ssl: "managed", status: "pending", https: true, createdAt: new Date(Date.now() - 20 * 60 * 1000) })
   assert.equal(old.state, "stuck")
   assert.equal(old.tone, "warn")
   const active = deriveCertStatus({ hostname: "app.example.com", ssl: "managed", status: "active", https: true })
