@@ -72,6 +72,7 @@ import {
   parseRouteWarnings,
 } from "../src/lib/route-after-deploy"
 import { renderDomainRouteYaml } from "../src/lib/routing"
+import { githubTreesApiUrl, pathsFromGithubTreesJson, githubRawFileUrl } from "../src/lib/github-tree"
 
 let n = 0
 const ok = (name: string) => console.log(`  ✓ ${name}`)
@@ -736,6 +737,24 @@ check("renderDomainRouteYaml: letsencrypt gets HTTP+HTTPS routers (P5 HTTP-01)",
   })
   assert.match(httpOnly, /entryPoints: \[web\]/)
   assert.doesNotMatch(httpOnly, /websecure/)
+})
+
+check("githubTreesApiUrl + pathsFromGithubTreesJson (P2 tree fetch helpers)", () => {
+  const meta = githubTreesApiUrl("github.com/vercel/next.js", "canary")
+  assert.ok(meta)
+  assert.match(meta!.treesUrl, /^https:\/\/api\.github\.com\/repos\/vercel\/next\.js\/git\/trees\/canary/)
+  assert.equal(githubTreesApiUrl("gitlab.com/org/repo", "main"), null)
+  const { files, truncated } = pathsFromGithubTreesJson({
+    truncated: false,
+    tree: [
+      { path: "package.json", type: "blob" },
+      { path: "src", type: "tree" },
+      { path: "src/index.ts", type: "blob" },
+    ],
+  })
+  assert.deepEqual(files, ["package.json", "src/index.ts"])
+  assert.equal(truncated, false)
+  assert.match(githubRawFileUrl("o", "r", "main", "package.json"), /raw\.githubusercontent\.com\/o\/r\/main\/package\.json/)
 })
 
 console.log(`\n  ${n} checks passed ✓`)

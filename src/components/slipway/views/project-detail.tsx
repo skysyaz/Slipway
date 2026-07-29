@@ -933,6 +933,14 @@ function DomainsTab({ project, onAddDomain }: { project: Project; onAddDomain: (
                   <>SSL: {dom.ssl}</>
                 )}
               </div>
+              {dom.status === 'action-required' && (
+                <div className="mt-1.5 flex items-start gap-1.5 text-[11px] text-amber-400">
+                  <AlertTriangle size={11} className="mt-0.5 shrink-0" />
+                  <span>
+                    Action required — the app may still be up. Fix DNS / Traefik mount and re-add or redeploy to retry routing.
+                  </span>
+                </div>
+              )}
             </div>
             <StatusDot status={dom.status} />
             <Button variant="ghost" size="sm" className="h-8 w-8 p-0 text-rose-500 hover:text-rose-500 shrink-0" title="Remove domain" onClick={() => void remove(dom)}>
@@ -1392,30 +1400,53 @@ function SettingsTab({ project }: { project: Project }) {
         </div>
       </SettingsCard>
 
-      {/* ponytail: these five are STORED PREFERENCES ONLY — nothing reads them.
-          Grep for autoDeploy/requireTests/autoRollback/pauseDuringWindows/
-          prPreviews outside the schema, the serializer and this file: the only
-          hit is the PATCH allow-list that persists them. There is no inbound
-          git webhook (so nothing can auto-deploy or react to a PR), the
-          pipeline's "test" stage runs no tests, no health-check watcher exists
-          to auto-roll-back, and deploy windows are not a concept anywhere. They
-          are kept because they round-trip correctly and describe intent, but
-          the card says plainly that they don't act yet — a toggle that silently
-          does nothing is worse than no toggle. */}
+      {/* ponytail: autoDeploy IS acted on by POST /api/git/webhook when the
+          project flag is on. requireTests / autoRollback / pauseDuringWindows /
+          prPreviews remain intent-only — say so explicitly per toggle. */}
       <SettingsCard
         title="Build & Deploy"
-        description="Stored for a future release — none of these are acted on by this build yet."
+        description="Auto-deploy works via POST /api/git/webhook. Other toggles below are still intent-only."
       >
         <div className="space-y-3">
-          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-[12px] text-foreground/80 leading-snug">
-            These preferences persist, but nothing enforces them today. Deploys are triggered manually (dashboard or
-            API), tests aren&apos;t run by the pipeline, and rollback is an explicit action from the Deployments list.
+          <div className="rounded-lg border border-border bg-muted/20 p-3 text-[12px] text-foreground/80 leading-snug space-y-2">
+            <div>
+              <span className="font-medium text-foreground">Push-to-deploy webhook:</span>{' '}
+              <code className="font-mono text-[11px]">POST /api/git/webhook</code> with a Bearer token
+              (deploy scope) and JSON{' '}
+              <code className="font-mono text-[11px]">
+                {`{ "projectId": "${project.id}", "changedPaths": [...], "branch": "main" }`}
+              </code>
+              . Honors Auto-deploy and monorepo path skip.
+            </div>
           </div>
-          <ToggleRow label="Auto-deploy on push to main" description="Intent only — Slipway has no inbound git webhook, so no push can trigger a deploy." checked={project.autoDeploy} onChange={(v) => toggle('autoDeploy', v)} />
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <Label className="text-[11px]">Monorepo path</Label>
+              <Input
+                className="mt-1 h-8 text-[13px] font-mono"
+                placeholder="apps/web"
+                defaultValue={project.monorepoPath || ''}
+                onBlur={(e) => {
+                  const v = e.target.value.trim()
+                  void api
+                    .patch(`/api/projects/${project.id}`, {
+                      monorepo: Boolean(v),
+                      monorepoPath: v || null,
+                    })
+                    .then(() => refetch(['projects']))
+                    .catch(() => {})
+                }}
+              />
+              <p className="text-[10px] text-muted-foreground mt-1">
+                When set, pushes that do not touch this path skip a rebuild.
+              </p>
+            </div>
+          </div>
+          <ToggleRow label="Auto-deploy on push" description="When on, POST /api/git/webhook triggers a deploy for this project." checked={project.autoDeploy} onChange={(v) => toggle('autoDeploy', v)} />
           <ToggleRow label="Require passing tests" description="Intent only — the pipeline's test stage does not execute a test suite." checked={project.requireTests} onChange={(v) => toggle('requireTests', v)} />
           <ToggleRow label="Auto-rollback on health check failure" description="Intent only — no watcher monitors a release after it goes live. Roll back from the Deployments list." checked={project.autoRollback} onChange={(v) => toggle('autoRollback', v)} />
           <ToggleRow label="Pause during deploy windows" description="Intent only — maintenance windows aren't configurable anywhere yet." checked={project.pauseDuringWindows} onChange={(v) => toggle('pauseDuringWindows', v)} />
-          <ToggleRow label="PR preview environments" description="Intent only — nothing reacts to a pull request opening or closing." checked={project.prPreviews} onChange={(v) => toggle('prPreviews', v)} />
+          <ToggleRow label="PR preview environments" description="Intent only — nothing reacts to a pull request opening or closing yet (webhook is push-only)." checked={project.prPreviews} onChange={(v) => toggle('prPreviews', v)} />
         </div>
       </SettingsCard>
 

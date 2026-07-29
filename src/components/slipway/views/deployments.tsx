@@ -155,12 +155,36 @@ export function DeploymentsView() {
                     )}
                   </div>
                   <div className="text-[12px] mt-0.5">{d.commitMessage}</div>
+                  {d.routeWarnings && d.routeWarnings.length > 0 && (
+                    <div className="mt-2 flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-200/90">
+                      <AlertTriangle size={12} className="mt-0.5 shrink-0 text-amber-400" />
+                      <div className="min-w-0">
+                        <div className="font-medium text-amber-100">Routing action required — app is up</div>
+                        <div className="font-mono mt-0.5 truncate">{d.routeWarnings[0]}</div>
+                      </div>
+                    </div>
+                  )}
+                  {d.configSnapshot && typeof d.configSnapshot === 'object' && (
+                    <div className="mt-1.5 text-[10px] text-muted-foreground font-mono truncate">
+                      snapshot:{' '}
+                      {(d.configSnapshot as { buildCmd?: string; startCmd?: string; stack?: string }).stack || '—'}
+                      {(d.configSnapshot as { startCmd?: string }).startCmd
+                        ? ` · start ${(d.configSnapshot as { startCmd?: string }).startCmd}`
+                        : ''}
+                    </div>
+                  )}
                   <div className="text-[11px] text-muted-foreground font-mono mt-1 flex items-center gap-2 flex-wrap">
                     <span>{d.commitSha || '—'}</span>
                     <span className="text-border">·</span>
                     <span>{d.branch}</span>
                     <span className="text-border">·</span>
                     <span>by {d.author}</span>
+                    {d.forceAll && (
+                      <>
+                        <span className="text-border">·</span>
+                        <span>forceAll</span>
+                      </>
+                    )}
                   </div>
                 </div>
                 <div className="text-right shrink-0">

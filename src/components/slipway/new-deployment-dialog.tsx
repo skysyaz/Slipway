@@ -33,21 +33,51 @@ import {
   Eye,
 } from 'lucide-react'
 import { useSlipway } from '@/lib/slipway/store'
-import { StackGlyph, StatusDot } from './icons'
+import { StackGlyph } from './icons'
 import { cn } from '@/lib/utils'
+import { api, ApiError } from '@/lib/api'
 
 type Source = 'git' | 'folder' | 'compose'
 
-const detectableStacks = [
-  { kind: 'nextjs', label: 'Next.js 16', reason: 'detected next.config.ts, package.json next@16', build: 'next build', port: 3000 },
-  { kind: 'node', label: 'Node.js · Fastify', reason: 'package.json with fastify + tsx', build: 'tsc && tsx build.ts', port: 3000 },
-  { kind: 'python', label: 'Python · FastAPI', reason: 'pyproject.toml with fastapi + uvicorn', build: 'pip install -e .', port: 8000 },
-  { kind: 'go', label: 'Go · Chi', reason: 'go.mod with chi + pgx', build: 'go build ./cmd/api', port: 8080 },
-  { kind: 'static', label: 'Static · Astro', reason: 'astro.config.mjs found', build: 'astro build', port: 80 },
-  { kind: 'compose', label: 'Docker Compose · 6 services', reason: 'docker-compose.yml with 6 services', build: 'compose build', port: 0 },
-] as const
+type DetectedChoice = {
+  kind: string
+  label: string
+  reason: string
+  build: string
+  start: string
+  port: number
+  confidence?: string
+}
+
+const MANUAL_STACKS: DetectedChoice[] = [
+  { kind: 'nextjs', label: 'Next.js', reason: 'manual', build: 'npm run build', start: 'npm run start', port: 3000 },
+  { kind: 'node', label: 'Node.js', reason: 'manual', build: '', start: 'npm start', port: 3000 },
+  { kind: 'python', label: 'Python', reason: 'manual', build: '', start: 'uvicorn main:app --host 0.0.0.0 --port 8000', port: 8000 },
+  { kind: 'go', label: 'Go', reason: 'manual', build: 'CGO_ENABLED=0 go build -o /out/app .', start: './app', port: 8080 },
+  { kind: 'static', label: 'Static', reason: 'manual', build: '', start: '', port: 80 },
+  { kind: 'dockerfile', label: 'Dockerfile', reason: 'manual', build: '', start: '', port: 3000 },
+  { kind: 'compose', label: 'Docker Compose', reason: 'manual', build: '', start: '', port: 0 },
+]
 
 const steps = ['Source', 'Detect', 'Configure', 'Review'] as const
+
+function labelFor(kind: string, framework: string): string {
+  if (framework && framework !== kind && framework !== 'unknown') {
+    return `${kind} · ${framework}`
+  }
+  const map: Record<string, string> = {
+    nextjs: 'Next.js',
+    node: 'Node.js',
+    python: 'Python',
+    go: 'Go',
+    rust: 'Rust',
+    static: 'Static',
+    dockerfile: 'Dockerfile',
+    compose: 'Docker Compose',
+    unknown: 'Unknown',
+  }
+  return map[kind] || kind
+}
 
 export function NewDeploymentDialog() {
   const open = useSlipway((s) => s.newDeploymentOpen)
@@ -67,12 +97,16 @@ export function NewDeploymentDialog() {
   const [composePath, setComposePath] = React.useState('')
   const [env, setEnv] = React.useState<'production' | 'staging' | 'preview'>('production')
   const [autoDetect, setAutoDetect] = React.useState(true)
+  const [choices, setChoices] = React.useState<DetectedChoice[]>(MANUAL_STACKS)
   const [detectedIdx, setDetectedIdx] = React.useState(0)
   const [detecting, setDetecting] = React.useState(false)
+  const [detectError, setDetectError] = React.useState('')
   const [domain, setDomain] = React.useState('')
   const [ssl, setSsl] = React.useState(true)
   const [buildCmd, setBuildCmd] = React.useState('')
   const [startCmd, setStartCmd] = React.useState('')
+  const [monorepo, setMonorepo] = React.useState(false)
+  const [monorepoPath, setMonorepoPath] = React.useState('')
   const [deploying, setDeploying] = React.useState(false)
   const [deployedProjectId, setDeployedProjectId] = React.useState<string | null>(null)
 
@@ -86,71 +120,143 @@ export function NewDeploymentDialog() {
         setDeployedProjectId(null)
         setDetectedIdx(0)
         setDetecting(false)
+        setDetectError('')
+        setChoices(MANUAL_STACKS)
         setDomain('')
         setSsl(true)
         setAutoDetect(true)
         setBuildCmd('')
         setStartCmd('')
+        setMonorepo(false)
+        setMonorepoPath('')
+        setRepoUrl('')
+        setBranch('')
+        setFolderPath('')
+        setComposePath('')
       }, 200)
       return () => clearTimeout(id)
     }
   }, [open])
 
-  // when moving to detect step, simulate detection
-  // The setTimeout is set up only when entering step 1 — `detecting` is intentionally
-  // excluded from deps so the re-render from setDetecting(true) does NOT clear it.
+  // Real stack detect via POST /api/projects/detect (OpenShip P2).
   React.useEffect(() => {
     if (step !== 1 || !autoDetect) return
+    let cancelled = false
     setDetecting(true)
-    const id = setTimeout(() => {
-      const idx = source === 'compose' ? 5 : source === 'folder' ? 4 : 0
-      setDetectedIdx(idx)
-      setBuildCmd(detectableStacks[idx].build)
-      setStartCmd(
-        detectableStacks[idx].kind === 'nextjs'
-          ? 'next start'
-          : detectableStacks[idx].kind === 'static'
-          ? 'nginx -g "daemon off;"'
-          : 'node dist/index.js',
-      )
-      setDomain(
-        source === 'compose'
-          ? 'crm.slipway.app'
-          : source === 'folder'
-          ? 'status.slipway.app'
-          : 'helix-web.slipway.app',
-      )
-      setDetecting(false)
-    }, 1400)
-    return () => clearTimeout(id)
-  }, [step, autoDetect, source])
+    setDetectError('')
+    ;(async () => {
+      try {
+        if (source === 'compose') {
+          const r = await api.post<{
+            stack: string
+            framework: string
+            buildCmd: string
+            startCmd: string
+            port: number
+            confidence: string
+          }>('/api/projects/detect', { source: 'compose', files: ['docker-compose.yml'] })
+          if (cancelled) return
+          const best: DetectedChoice = {
+            kind: r.stack || 'compose',
+            label: labelFor(r.stack, r.framework),
+            reason: `confidence ${r.confidence}`,
+            build: r.buildCmd || '',
+            start: r.startCmd || '',
+            port: r.port || 0,
+            confidence: r.confidence,
+          }
+          setChoices([best, ...MANUAL_STACKS.filter((m) => m.kind !== best.kind)])
+          setDetectedIdx(0)
+          setBuildCmd(best.build)
+          setStartCmd(best.start)
+        } else if (source === 'git') {
+          if (!repoUrl.trim()) {
+            setDetectError('Enter a public github.com repository URL on the Source step to auto-detect.')
+            setChoices(MANUAL_STACKS)
+            setDetectedIdx(0)
+            return
+          }
+          const r = await api.post<{
+            stack: string
+            framework: string
+            buildCmd: string
+            startCmd: string
+            port: number
+            confidence: string
+            fileCount?: number
+          }>('/api/projects/detect', {
+            repoUrl: repoUrl.trim(),
+            branch: branch.trim() || 'main',
+          })
+          if (cancelled) return
+          const best: DetectedChoice = {
+            kind: r.stack || 'node',
+            label: labelFor(r.stack, r.framework),
+            reason: `detected from ${r.fileCount ?? '?'} files · confidence ${r.confidence}`,
+            build: r.buildCmd || '',
+            start: r.startCmd || '',
+            port: r.port || 3000,
+            confidence: r.confidence,
+          }
+          setChoices([best, ...MANUAL_STACKS.filter((m) => m.kind !== best.kind)])
+          setDetectedIdx(0)
+          setBuildCmd(best.build)
+          setStartCmd(best.start)
+          if (!domain) {
+            const slug = repoUrl.split('/').pop()?.replace(/\.git$/i, '') || 'app'
+            setDomain(`${slug}.example.com`)
+          }
+        } else {
+          // Folder: honest — no remote tree; operator picks manually or deploys to detect on checkout.
+          setDetectError(
+            'Local folder detect runs at deploy time (on the server path). Pick a stack below, or leave defaults and continue.',
+          )
+          setChoices(MANUAL_STACKS)
+          setDetectedIdx(0)
+        }
+      } catch (e) {
+        if (cancelled) return
+        setDetectError(e instanceof ApiError ? e.message : 'Detection failed — pick a stack manually.')
+        setChoices(MANUAL_STACKS)
+        setDetectedIdx(0)
+      } finally {
+        if (!cancelled) setDetecting(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-run when entering detect step / toggling auto
+  }, [step, autoDetect, source, repoUrl, branch])
 
   const next = () => setStep((s) => Math.min(steps.length - 1, s + 1))
   const back = () => setStep((s) => Math.max(0, s - 1))
 
   const deploy = async () => {
     setDeploying(true)
-    const stack = detectableStacks[detectedIdx]
-    // derive a project name from the domain or repo
+    const stack = choices[detectedIdx] || MANUAL_STACKS[0]
     const nameBase =
       domain?.split('.')[0] ||
-      (source === 'git' ? repoUrl.split('/').pop() : source === 'folder' ? folderPath.split('/').pop() : composePath.split('/').slice(-2, -1)[0]) ||
+      (source === 'git' ? repoUrl.split('/').pop()?.replace(/\.git$/i, '') : source === 'folder' ? folderPath.split('/').pop() : composePath.split('/').slice(-2, -1)[0]) ||
       'new-project'
     try {
       const created = await createAndDeploy({
         name: nameBase,
         source,
         repoUrl: source === 'git' ? repoUrl : undefined,
-        branch: source === 'git' ? branch : undefined,
+        branch: source === 'git' ? branch || 'main' : undefined,
         folderPath: source === 'folder' ? folderPath : undefined,
         composePath: source === 'compose' ? composePath : undefined,
         stack: stack.kind,
         stackLabel: stack.label,
+        framework: stack.label,
         environment: env,
         domain: domain || undefined,
         ssl,
         buildCmd: buildCmd || undefined,
         startCmd: startCmd || undefined,
+        monorepo: monorepo || undefined,
+        monorepoPath: monorepo && monorepoPath ? monorepoPath : undefined,
       })
       setDeployedProjectId(created ?? 'done')
     } catch (e) {
@@ -159,6 +265,8 @@ export function NewDeploymentDialog() {
       setDeploying(false)
     }
   }
+
+  const activeStack = choices[detectedIdx] || MANUAL_STACKS[0]
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -223,15 +331,24 @@ export function NewDeploymentDialog() {
           {step === 1 && (
             <DetectStep
               detecting={detecting}
+              detectError={detectError}
+              choices={choices}
               detectedIdx={detectedIdx}
-              setDetectedIdx={setDetectedIdx}
+              setDetectedIdx={(i: number) => {
+                setDetectedIdx(i)
+                const c = choices[i]
+                if (c) {
+                  setBuildCmd(c.build)
+                  setStartCmd(c.start)
+                }
+              }}
               autoDetect={autoDetect}
               setAutoDetect={setAutoDetect}
             />
           )}
           {step === 2 && (
             <ConfigureStep
-              stack={detectableStacks[detectedIdx]}
+              stack={activeStack}
               env={env}
               setEnv={setEnv}
               domain={domain}
@@ -242,6 +359,10 @@ export function NewDeploymentDialog() {
               setBuildCmd={setBuildCmd}
               startCmd={startCmd}
               setStartCmd={setStartCmd}
+              monorepo={monorepo}
+              setMonorepo={setMonorepo}
+              monorepoPath={monorepoPath}
+              setMonorepoPath={setMonorepoPath}
             />
           )}
           {step === 3 && (
@@ -251,13 +372,15 @@ export function NewDeploymentDialog() {
               branch={branch}
               folderPath={folderPath}
               composePath={composePath}
-              stack={detectableStacks[detectedIdx]}
+              stack={activeStack}
               env={env}
               domain={domain}
               ssl={ssl}
               buildCmd={buildCmd}
               startCmd={startCmd}
               deploying={deploying}
+              monorepo={monorepo}
+              monorepoPath={monorepoPath}
             />
           )}
         </div>
@@ -443,7 +566,15 @@ function SourceStep(props: any) {
   )
 }
 
-function DetectStep(props: any) {
+function DetectStep(props: {
+  detecting: boolean
+  detectError?: string
+  choices: DetectedChoice[]
+  detectedIdx: number
+  setDetectedIdx: (i: number) => void
+  autoDetect: boolean
+  setAutoDetect: (v: boolean) => void
+}) {
   return (
     <div className="space-y-4">
       <div className="flex items-start gap-3 p-3 rounded-lg border border-border bg-muted/30">
@@ -451,11 +582,9 @@ function DetectStep(props: any) {
         <div className="flex-1">
           <div className="text-[13px] font-medium">Automatic stack detection</div>
           <p className="text-[12px] text-muted-foreground mt-0.5 leading-snug">
-            Slipway reads <code className="font-mono text-[11px]">package.json</code>,{' '}
-            <code className="font-mono text-[11px]">pyproject.toml</code>,{' '}
-            <code className="font-mono text-[11px]">go.mod</code>,{' '}
-            <code className="font-mono text-[11px]">Cargo.toml</code>,{' '}
-            <code className="font-mono text-[11px]">Dockerfile</code>, and compose files to detect the stack, pick a builder, and set sane defaults.
+            For public <code className="font-mono text-[11px]">github.com</code> repos Slipway lists the tree and
+            reads manifests via <code className="font-mono text-[11px]">POST /api/projects/detect</code>. Private
+            repos and local folders detect at deploy/checkout time.
           </p>
           <div className="flex items-center gap-2 mt-2.5">
             <Switch id="auto-detect" checked={props.autoDetect} onCheckedChange={props.setAutoDetect} />
@@ -466,11 +595,17 @@ function DetectStep(props: any) {
         </div>
       </div>
 
+      {props.detectError && !props.detecting && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-[12px] text-foreground/90">
+          {props.detectError}
+        </div>
+      )}
+
       {props.detecting ? (
         <div className="space-y-2 py-6 flex flex-col items-center justify-center text-center">
           <div className="w-10 h-10 rounded-full border-2 border-primary/30 border-t-primary animate-spin" />
           <div className="text-[13px] font-medium mt-2">Detecting stack…</div>
-          <div className="text-[11px] text-muted-foreground font-mono">Reading repository root…</div>
+          <div className="text-[11px] text-muted-foreground font-mono">Calling /api/projects/detect…</div>
         </div>
       ) : (
         <>
@@ -478,17 +613,13 @@ function DetectStep(props: any) {
             {props.autoDetect ? 'Detected stacks (pick one to override)' : 'Choose a stack manually'}
           </div>
           <div className="space-y-2">
-            {detectableStacks.map((s, i) => {
+            {props.choices.map((s, i) => {
               const active = i === props.detectedIdx
               return (
                 <button
-                  key={s.label}
-                  onClick={() => {
-                    props.setDetectedIdx(i)
-                    if (!props.autoDetect) {
-                      // could update build/start cmds here
-                    }
-                  }}
+                  key={`${s.kind}-${s.label}-${i}`}
+                  type="button"
+                  onClick={() => props.setDetectedIdx(i)}
                   className={cn(
                     'w-full text-left rounded-lg border p-3 transition-all flex items-start gap-3',
                     active ? 'border-primary bg-primary/5 ring-1 ring-primary/30' : 'border-border hover:border-muted-foreground/40',
@@ -498,7 +629,7 @@ function DetectStep(props: any) {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
                       <span className="text-[13px] font-medium">{s.label}</span>
-                      {props.autoDetect && i === 0 && (
+                      {props.autoDetect && i === 0 && s.confidence && (
                         <Badge variant="secondary" className="text-[10px] h-4 px-1.5 bg-primary/15 text-primary">
                           <Sparkles size={9} className="mr-0.5" />
                           Best match
@@ -508,8 +639,16 @@ function DetectStep(props: any) {
                     </div>
                     <p className="text-[11px] text-muted-foreground mt-0.5 font-mono">{s.reason}</p>
                     <div className="flex flex-wrap items-center gap-2 mt-2">
-                      <Badge variant="outline" className="text-[10px] font-mono h-5">build: {s.build}</Badge>
-                      {s.port > 0 && <Badge variant="outline" className="text-[10px] font-mono h-5">port: {s.port}</Badge>}
+                      {s.build ? (
+                        <Badge variant="outline" className="text-[10px] font-mono h-5 max-w-full truncate">
+                          build: {s.build}
+                        </Badge>
+                      ) : null}
+                      {s.port > 0 && (
+                        <Badge variant="outline" className="text-[10px] font-mono h-5">
+                          port: {s.port}
+                        </Badge>
+                      )}
                     </div>
                   </div>
                 </button>
@@ -591,11 +730,33 @@ function ConfigureStep(props: any) {
         <Switch checked={props.ssl} onCheckedChange={props.setSsl} />
       </div>
 
+      <div className="flex items-center justify-between rounded-lg border border-border p-3">
+        <div>
+          <div className="text-[13px] font-medium">Monorepo sub-app</div>
+          <p className="text-[11px] text-muted-foreground">
+            Only rebuild when files under this path change (push webhook / smart monorepo).
+          </p>
+        </div>
+        <Switch checked={props.monorepo} onCheckedChange={props.setMonorepo} />
+      </div>
+      {props.monorepo && (
+        <div className="space-y-1.5">
+          <Label htmlFor="mono-path">Monorepo path</Label>
+          <Input
+            id="mono-path"
+            value={props.monorepoPath}
+            onChange={(e) => props.setMonorepoPath(e.target.value)}
+            placeholder="apps/web"
+            className="font-mono text-[13px]"
+          />
+        </div>
+      )}
+
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         {[
-          { icon: GitCommit, label: 'CI on push', value: 'On' },
-          { icon: Wrench, label: 'Health check', value: '/health' },
-          { icon: Server, label: 'Replicas', value: '2' },
+          { icon: GitCommit, label: 'CI on push', value: 'Webhook' },
+          { icon: Wrench, label: 'Health check', value: 'Container' },
+          { icon: Server, label: 'Replicas', value: '1' },
           { icon: Eye, label: 'Preview envs', value: props.env === 'preview' ? 'Per-PR' : 'Off' },
         ].map((opt) => {
           const Icon = opt.icon
@@ -698,8 +859,10 @@ function ReviewStep(props: any) {
               <span className="text-[12px] text-muted-foreground">Disabled</span>
             )}
           </Cell>
-          <Cell label="Replicas">
-            <span className="font-mono text-[12px]">2</span>
+          <Cell label="Monorepo">
+            <span className="font-mono text-[12px]">
+              {props.monorepo ? props.monorepoPath || 'on' : 'off'}
+            </span>
           </Cell>
           <Cell label="Build" className="col-span-3">
             <code className="font-mono text-[12px] text-foreground">{props.buildCmd}</code>
