@@ -723,11 +723,22 @@ check("renderDomainRouteYaml: letsencrypt gets HTTP+HTTPS routers (P5 HTTP-01)",
     hostname: "app.example.com",
     targetPort: 3000,
     tls: "letsencrypt",
+    http01DualRouters: true,
   })
   assert.match(yml, /entryPoints: \[web\]/)
   assert.match(yml, /entryPoints: \[websecure\]/)
   assert.match(yml, /certResolver: letsencrypt/)
   assert.match(yml, /127\.0\.0\.1:3000/)
+  const legacy = renderDomainRouteYaml({
+    projectSlug: "web",
+    projectId: "projxxxxxx",
+    hostname: "app.example.com",
+    targetPort: 3000,
+    tls: "letsencrypt",
+    http01DualRouters: false,
+  })
+  assert.doesNotMatch(legacy, /-http:/)
+  assert.match(legacy, /entryPoints: \[websecure\]/)
   const httpOnly = renderDomainRouteYaml({
     projectSlug: "web",
     projectId: "projxxxxxx",
@@ -737,6 +748,12 @@ check("renderDomainRouteYaml: letsencrypt gets HTTP+HTTPS routers (P5 HTTP-01)",
   })
   assert.match(httpOnly, /entryPoints: \[web\]/)
   assert.doesNotMatch(httpOnly, /websecure/)
+})
+
+check("domainStatusAfterRoute + flag-off semantics documented via helper", () => {
+  // Flag ON path uses action-required; flag OFF path (domains route) uses "failed".
+  assert.equal(domainStatusAfterRoute({ routed: false, tlsMode: "letsencrypt" }), "action-required")
+  assert.notEqual(domainStatusAfterRoute({ routed: false, tlsMode: "letsencrypt" }), "failed")
 })
 
 check("githubTreesApiUrl + pathsFromGithubTreesJson (P2 tree fetch helpers)", () => {

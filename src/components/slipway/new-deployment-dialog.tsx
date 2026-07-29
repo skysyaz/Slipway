@@ -216,6 +216,13 @@ export function NewDeploymentDialog() {
         }
       } catch (e) {
         if (cancelled) return
+        // Flag OFF → API returns 404; restore quiet manual-stack UX (no "detection failed").
+        if (e instanceof ApiError && e.status === 404) {
+          setDetectError('')
+          setChoices(MANUAL_STACKS)
+          setDetectedIdx(0)
+          return
+        }
         setDetectError(e instanceof ApiError ? e.message : 'Detection failed — pick a stack manually.')
         setChoices(MANUAL_STACKS)
         setDetectedIdx(0)

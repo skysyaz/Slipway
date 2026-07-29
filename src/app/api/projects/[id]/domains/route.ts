@@ -6,6 +6,7 @@ import { writeDomainRoute, isPrivateIp } from "@/lib/routing"
 import { validIp } from "@/lib/security"
 
 import { domainStatusAfterRoute } from "@/lib/route-after-deploy"
+import { FF } from "@/lib/feature-flags"
 
 export const dynamic = "force-dynamic"
 
@@ -97,11 +98,16 @@ export const POST = route(async (req, params, auth) => {
 
   await db.domain.update({
     where: { id: domain.id },
-    // P1: route failure → action-required (app may already be up); never pretend
-    // the cert is pending when Traefik never got the router. selfsigned/http
-    // land as active when routed (no ACME to wait on).
+    // P1 (flag ON): route failure → action-required. Flag OFF restores pre-port
+    // "failed" so SLIPWAY_FF_ROUTE_AFTER_DEPLOY=0 is bit-for-bit for this path.
     data: {
-      status: domainStatusAfterRoute({ routed, tlsMode }),
+      status: FF.routeAfterDeploy()
+        ? domainStatusAfterRoute({ routed, tlsMode })
+        : routed
+          ? tlsMode === "letsencrypt"
+            ? "pending"
+            : "active"
+          : "failed",
     },
   })
 

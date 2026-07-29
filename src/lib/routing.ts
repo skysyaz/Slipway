@@ -23,6 +23,7 @@ import { promises as fs } from "node:fs"
 import { accessSync } from "node:fs"
 import path from "node:path"
 import { validIp, isPrivateIp } from "./security"
+import { FF } from "./feature-flags"
 
 export { isPrivateIp, validIp }
 
@@ -34,6 +35,11 @@ export interface DomainRouteInput {
   targetPort: number
   /** domain mode: letsencrypt | selfsigned | http */
   tls: "letsencrypt" | "selfsigned" | "http"
+  /**
+   * P5: when true (default for OpenShip port ON), letsencrypt also gets an HTTP
+   * (web) router for ACME HTTP-01. When false, restores pre-port HTTPS-only.
+   */
+  http01DualRouters?: boolean
 }
 
 function dynamicDir(): string {
@@ -78,20 +84,31 @@ export function renderDomainRouteYaml(input: DomainRouteInput): string {
     "  routers:",
   ]
   if (input.tls === "letsencrypt") {
-    // HTTP router first (ACME HTTP-01 + reachable while cert pending).
     // P5 OpenShip property adapted for Traefik — see THIRD-PARTY/NOTICES.
-    lines.push(
-      `    ${routerName}-http:`,
-      `      rule: "${hostRule}"`,
-      `      service: ${serviceName}`,
-      "      entryPoints: [web]",
-      `    ${routerName}:`,
-      `      rule: "${hostRule}"`,
-      `      service: ${serviceName}`,
-      "      entryPoints: [websecure]",
-      "      tls:",
-      "        certResolver: letsencrypt"
-    )
+    // Flag OFF (http01DualRouters === false) restores HTTPS-only pre-port YAML.
+    if (input.http01DualRouters !== false) {
+      lines.push(
+        `    ${routerName}-http:`,
+        `      rule: "${hostRule}"`,
+        `      service: ${serviceName}`,
+        "      entryPoints: [web]",
+        `    ${routerName}:`,
+        `      rule: "${hostRule}"`,
+        `      service: ${serviceName}`,
+        "      entryPoints: [websecure]",
+        "      tls:",
+        "        certResolver: letsencrypt"
+      )
+    } else {
+      lines.push(
+        `    ${routerName}:`,
+        `      rule: "${hostRule}"`,
+        `      service: ${serviceName}`,
+        "      entryPoints: [websecure]",
+        "      tls:",
+        "        certResolver: letsencrypt"
+      )
+    }
   } else if (input.tls === "selfsigned") {
     lines.push(
       `    ${routerName}:`,
@@ -130,7 +147,13 @@ export async function writeDomainRoute(input: DomainRouteInput): Promise<string>
   await fs.mkdir(dir, { recursive: true })
   const slug = input.projectSlug.replace(/[^a-z0-9-]/gi, "-").toLowerCase()
   const file = path.join(dir, `app-${slug}-${input.projectId.slice(-6)}.yml`)
-  await fs.writeFile(file, renderDomainRouteYaml(input), "utf8")
+  // P5 dual routers follow SLIPWAY_FF_ROUTE_AFTER_DEPLOY so flag OFF restores
+  // pre-port HTTPS-only letsencrypt YAML.
+  const yaml = renderDomainRouteYaml({
+    ...input,
+    http01DualRouters: input.http01DualRouters ?? FF.routeAfterDeploy(),
+  })
+  await fs.writeFile(file, yaml, "utf8")
   return file
 }
 

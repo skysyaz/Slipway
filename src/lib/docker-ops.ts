@@ -46,7 +46,7 @@ import {
   defaultPortFor,
   type DetectedStack,
 } from "./git-deploy"
-import { encryptSecret, decryptSecret } from "./security"
+import { encryptSecret, decryptSecret, execFormArgv, hasShellMetachars } from "./security"
 import type { DeployOptions } from "./simulate"
 import { FF } from "./feature-flags"
 import { detectStackDetailed } from "./stack-detect"
@@ -586,7 +586,8 @@ async function runPipeline(
       })
     }
 
-    // P3: prefer frozen snapshot build/start when present (exact redeploy).
+    // P3: this deployment's frozen snapshot is the source of truth for
+    // build/start/stack — not the live Project row (which may have drifted).
     if (FF.deploySnapshot()) {
       const depRow = await db.deployment.findUnique({
         where: { id: deploymentId },
@@ -594,13 +595,9 @@ async function runPipeline(
       })
       const snap = parseSnapshot(depRow?.configSnapshot)
       if (snap) {
-        if (snap.buildCmd !== undefined && ctx.opts.buildCmd === undefined) {
-          ctx.opts.buildCmd = snap.buildCmd
-        }
-        if (snap.startCmd !== undefined && !ctx.opts.startCmd) {
-          ctx.opts.startCmd = snap.startCmd || undefined
-        }
-        if (snap.stack && !ctx.opts.stack) ctx.opts.stack = snap.stack
+        if (snap.buildCmd !== undefined) ctx.opts.buildCmd = snap.buildCmd || undefined
+        if (snap.startCmd !== undefined) ctx.opts.startCmd = snap.startCmd || undefined
+        if (snap.stack) ctx.opts.stack = snap.stack
       }
     }
 
@@ -956,6 +953,21 @@ async function runPipeline(
               where: { projectId, kind: "app" },
               data: { port: hostPort },
             })
+          }
+          // P3: stamp the resolved host port onto the frozen snapshot once known.
+          if (FF.deploySnapshot()) {
+            const depRow = await db.deployment.findUnique({
+              where: { id: deploymentId },
+              select: { configSnapshot: true },
+            })
+            const snap = parseSnapshot(depRow?.configSnapshot)
+            if (snap) {
+              snap.port = hostPort
+              await db.deployment.update({
+                where: { id: deploymentId },
+                data: { configSnapshot: serializeSnapshot(snap) },
+              })
+            }
           }
         } catch (re) {
           await failStep(8, ((re as Error).message || "").trim())
@@ -1826,12 +1838,34 @@ export async function realRollback(deploymentId: string, actor = "you"): Promise
     }
 
     const cfg = await containerConfigFor(project.id)
-    // P3: when rolling back to a deployment that froze startCmd, prefer that
-    // over the live Project.startCmd so we re-run exactly what shipped.
+    // P3: when rolling back to a deployment that froze startCmd/env, prefer that
+    // over the live Project row so we re-run exactly what shipped.
     if (FF.deploySnapshot()) {
       const snap = parseSnapshot(target.configSnapshot)
       if (snap?.startCmd) {
-        cfg.Cmd = snap.startCmd.split(/\s+/).filter(Boolean)
+        if (hasShellMetachars(snap.startCmd)) {
+          throw new Error(
+            `Frozen startCmd on that deployment contains shell metacharacters — refusing to roll back with an unsafe command. Redeploy from source instead.`
+          )
+        }
+        cfg.Cmd = execFormArgv(snap.startCmd)
+      }
+      if (snap?.env && Object.keys(snap.env).length) {
+        const encrypted = new Set(snap.encryptedEnvKeys || [])
+        // Snapshot env overlays (and replaces keys present on the live project).
+        const envFromSnap: string[] = []
+        for (const [k, v] of Object.entries(snap.env)) {
+          let plain = v
+          if (encrypted.has(k)) {
+            try {
+              plain = decryptSecret(v)
+            } catch {
+              continue
+            }
+          }
+          envFromSnap.push(`${k}=${plain}`)
+        }
+        if (envFromSnap.length) cfg.Env = envFromSnap
       }
     }
     const envMap = new Map<string, string>()
