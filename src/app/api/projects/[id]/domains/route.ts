@@ -5,6 +5,8 @@ import { emit } from "@/lib/notify"
 import { writeDomainRoute, isPrivateIp } from "@/lib/routing"
 import { validIp } from "@/lib/security"
 
+import { domainStatusAfterRoute } from "@/lib/route-after-deploy"
+
 export const dynamic = "force-dynamic"
 
 const INCLUDE = { services: true, domains: true, envVars: true } as const
@@ -95,8 +97,12 @@ export const POST = route(async (req, params, auth) => {
 
   await db.domain.update({
     where: { id: domain.id },
-    // selfsigned/http land as active (no cert to wait on); only ACME stays pending.
-    data: { status: routed ? (tlsMode === "letsencrypt" ? "pending" : "active") : "failed" },
+    // P1: route failure → action-required (app may already be up); never pretend
+    // the cert is pending when Traefik never got the router. selfsigned/http
+    // land as active when routed (no ACME to wait on).
+    data: {
+      status: domainStatusAfterRoute({ routed, tlsMode }),
+    },
   })
 
   await emit(
@@ -111,7 +117,7 @@ export const POST = route(async (req, params, auth) => {
           : tlsMode === "selfsigned"
             ? `${hostname} routed via Traefik with a self-signed cert (browsers will warn).`
             : `${hostname} routed via Traefik over plain HTTP (not encrypted).`
-        : `${hostname} recorded, but the Traefik route could not be written (${routeError || "routing dir unavailable"}). Reconcile after the proxy dir is mounted.`,
+        : `${hostname} recorded, but the Traefik route could not be written (${routeError || "routing dir unavailable"}). Action required — fix the proxy mount and retry; the app is not taken down.`,
       level: routed ? "success" : "error",
       kind: "ssl",
     },

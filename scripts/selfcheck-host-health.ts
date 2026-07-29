@@ -49,6 +49,29 @@ import {
   shellQuote,
 } from "../src/lib/security"
 import { deriveCertStatus, reachabilityFromProbe } from "../src/lib/status"
+import { flagsFromEnv } from "../src/lib/feature-flags"
+import { detectStackDetailed, stackAutofill } from "../src/lib/stack-detect"
+import {
+  classifyChangedFiles,
+  classifyPushChanges,
+  routeServicesByChanges,
+  shouldSkipMonorepoRebuild,
+  unionCommitFiles,
+} from "../src/lib/changed-files"
+import {
+  buildDeploySnapshot,
+  parseSnapshot,
+  serializeSnapshot,
+  snapshotForApi,
+} from "../src/lib/deploy-snapshot"
+import {
+  domainStatusAfterRoute,
+  deriveRoutingAction,
+  formatRouteWarning,
+  serializeRouteWarnings,
+  parseRouteWarnings,
+} from "../src/lib/route-after-deploy"
+import { renderDomainRouteYaml } from "../src/lib/routing"
 
 let n = 0
 const ok = (name: string) => console.log(`  ✓ ${name}`)
@@ -535,6 +558,184 @@ check("reachabilityFromProbe: reachable / 404 / tls / conn-fail mapped with hint
   const down = reachabilityFromProbe({ ok: false, error: "fetch failed: ECONNREFUSED" })
   assert.equal(down.state, "connection-failed")
   assert.match(down.hint || "", /crash-looping|port/i)
+})
+
+// ── OpenShip port: feature flags / P1–P4 pure helpers ───────────────────────
+check("feature flags: unset defaults ON; 0/false/off/no disable", () => {
+  const on = flagsFromEnv({})
+  assert.equal(on.routeAfterDeploy, true)
+  assert.equal(on.deploySnapshot, true)
+  assert.equal(on.stackDetect, true)
+  assert.equal(on.smartMonorepo, true)
+  const off = flagsFromEnv({
+    SLIPWAY_FF_ROUTE_AFTER_DEPLOY: "0",
+    SLIPWAY_FF_DEPLOY_SNAPSHOT: "false",
+    SLIPWAY_FF_STACK_DETECT: "off",
+    SLIPWAY_FF_SMART_MONOREPO: "no",
+  })
+  assert.equal(off.routeAfterDeploy, false)
+  assert.equal(off.deploySnapshot, false)
+  assert.equal(off.stackDetect, false)
+  assert.equal(off.smartMonorepo, false)
+})
+
+check("detectStackDetailed: nextjs / fastapi / dockerfile / compose", () => {
+  const next = detectStackDetailed({
+    files: ["package.json", "next.config.js"],
+    fileContents: {
+      "package.json": JSON.stringify({
+        dependencies: { next: "15.0.0", react: "19.0.0" },
+        scripts: { build: "next build", start: "next start" },
+      }),
+    },
+  })
+  assert.equal(next.stack, "nextjs")
+  assert.equal(next.framework, "nextjs")
+  assert.match(next.buildCommand, /build/)
+  const fill = stackAutofill(next)
+  assert.equal(fill.port, 3000)
+
+  const docker = detectStackDetailed({ files: ["Dockerfile", "package.json"] })
+  assert.equal(docker.stack, "dockerfile")
+
+  const compose = detectStackDetailed({ files: ["docker-compose.yml"] })
+  assert.equal(compose.stack, "compose")
+
+  const fa = detectStackDetailed({
+    files: ["requirements.txt", "main.py"],
+    fileContents: { "requirements.txt": "fastapi==0.115.0\nuvicorn\n" },
+  })
+  assert.equal(fa.stack, "python")
+  assert.equal(fa.framework, "fastapi")
+  assert.match(fa.startCommand, /uvicorn/)
+})
+
+check("domainStatusAfterRoute + deriveCertStatus action-required (P1)", () => {
+  assert.equal(domainStatusAfterRoute({ routed: false, tlsMode: "letsencrypt" }), "action-required")
+  assert.equal(domainStatusAfterRoute({ routed: true, tlsMode: "letsencrypt" }), "pending")
+  assert.equal(domainStatusAfterRoute({ routed: true, tlsMode: "http" }), "active")
+  const ar = deriveCertStatus({
+    hostname: "app.example.com",
+    ssl: "managed",
+    status: "action-required",
+    https: true,
+  })
+  assert.equal(ar.state, "action-required")
+  assert.equal(ar.tone, "warn")
+  assert.match(ar.reason || "", /App is up/i)
+  const warn = formatRouteWarning("app.example.com", "ENOENT traefik dir")
+  assert.match(warn, /^app\.example\.com:/)
+  const ser = serializeRouteWarnings([warn])
+  assert.deepEqual(parseRouteWarnings(ser), [warn])
+  const chip = deriveRoutingAction({ status: "action-required", routeWarnings: [warn], hostname: "app.example.com" })
+  assert.equal(chip.actionRequired, true)
+})
+
+check("buildDeploySnapshot freezes build/start and scrubs secrets for API (P3)", () => {
+  process.env.NEXTAUTH_SECRET = process.env.NEXTAUTH_SECRET || "selfcheck-secret-for-snapshot-tests-32b"
+  const snap = buildDeploySnapshot(
+    {
+      source: "git",
+      repoUrl: "https://github.com/org/repo.git",
+      stack: "nextjs",
+      buildCmd: "npm run build",
+      startCmd: "npm run start",
+      environment: "production",
+      envVars: [
+        { key: "PUBLIC_URL", value: "https://x", scope: "all", masked: false },
+        { key: "SECRET_TOKEN", value: "super-secret", scope: "production", masked: true },
+      ],
+    },
+    { branch: "main", port: 3000 }
+  )
+  assert.equal(snap.version, 1)
+  assert.equal(snap.buildCmd, "npm run build")
+  assert.equal(snap.startCmd, "npm run start")
+  assert.equal(snap.env?.PUBLIC_URL, "https://x")
+  assert.ok(snap.env?.SECRET_TOKEN?.startsWith("v1:"))
+  assert.ok(snap.encryptedEnvKeys?.includes("SECRET_TOKEN"))
+  const raw = serializeSnapshot(snap)
+  assert.equal(parseSnapshot(raw)?.branch, "main")
+  const api = snapshotForApi(raw) as { env?: Record<string, string> }
+  assert.equal(api.env?.SECRET_TOKEN, "[redacted]")
+})
+
+check("changed-files classifiers: root-config forceAll, monorepo skip, truncate (P4)", () => {
+  assert.equal(classifyChangedFiles(["apps/web/page.tsx"]).forceAll, false)
+  assert.equal(classifyChangedFiles(["package.json"]).forceAll, true)
+  assert.equal(classifyChangedFiles(["package.json"]).reason, "root-config")
+  const shared = classifyChangedFiles(["packages/ui/button.tsx"], {
+    isMonorepo: true,
+    monorepoSharedPaths: ["packages/"],
+  })
+  assert.equal(shared.forceAll, true)
+  assert.equal(shared.reason, "shared-package")
+
+  const routed = routeServicesByChanges(
+    [
+      { id: "web", rootDirectory: "apps/web" },
+      { id: "api", rootDirectory: "apps/api" },
+    ],
+    ["apps/web/page.tsx"]
+  )
+  assert.equal(routed.mode, "services")
+  if (routed.mode === "services") assert.deepEqual(routed.serviceIds, ["web"])
+
+  const skip = shouldSkipMonorepoRebuild({
+    monorepoPath: "apps/web",
+    files: ["apps/api/main.go"],
+  })
+  assert.equal(skip.skip, true)
+  const noskip = shouldSkipMonorepoRebuild({
+    monorepoPath: "apps/web",
+    files: ["apps/web/page.tsx"],
+  })
+  assert.equal(noskip.skip, false)
+
+  const files = unionCommitFiles([
+    { added: ["a.ts"], modified: ["b.ts"], removed: ["c.ts"] },
+  ])
+  assert.equal(files.size, 3)
+  const truncated = classifyPushChanges({
+    files: ["apps/web/x.ts"],
+    truncated: true,
+    isMonorepo: true,
+  })
+  assert.equal(truncated.forceAll, true)
+  assert.equal(truncated.reason, "truncated")
+  const forced = classifyPushChanges({
+    files: [],
+    forced: true,
+  })
+  assert.equal(forced.reason, "force-push")
+  const token = classifyPushChanges({
+    files: ["x"],
+    headMessage: "fix: stuff [force-deploy]",
+  })
+  assert.equal(token.reason, "commit-token")
+})
+
+check("renderDomainRouteYaml: letsencrypt gets HTTP+HTTPS routers (P5 HTTP-01)", () => {
+  const yml = renderDomainRouteYaml({
+    projectSlug: "web",
+    projectId: "projxxxxxx",
+    hostname: "app.example.com",
+    targetPort: 3000,
+    tls: "letsencrypt",
+  })
+  assert.match(yml, /entryPoints: \[web\]/)
+  assert.match(yml, /entryPoints: \[websecure\]/)
+  assert.match(yml, /certResolver: letsencrypt/)
+  assert.match(yml, /127\.0\.0\.1:3000/)
+  const httpOnly = renderDomainRouteYaml({
+    projectSlug: "web",
+    projectId: "projxxxxxx",
+    hostname: "app.example.com",
+    targetPort: 8080,
+    tls: "http",
+  })
+  assert.match(httpOnly, /entryPoints: \[web\]/)
+  assert.doesNotMatch(httpOnly, /websecure/)
 })
 
 console.log(`\n  ${n} checks passed ✓`)

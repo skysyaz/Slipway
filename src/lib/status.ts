@@ -4,7 +4,15 @@
  * the transitions without Docker or a network.
  */
 
-export type CertState = "active" | "pending" | "stuck" | "failed" | "self-signed" | "http" | "unknown"
+export type CertState =
+  | "active"
+  | "pending"
+  | "stuck"
+  | "failed"
+  | "self-signed"
+  | "http"
+  | "action-required"
+  | "unknown"
 
 export interface CertStatus {
   state: CertState
@@ -53,6 +61,17 @@ export function deriveCertStatus(opts: {
   }
   if (opts.status === "failed") {
     return { state: "failed", label: "Cert failed", tone: "error", checkedAt: new Date(now).toISOString() }
+  }
+  // P1 (OpenShip): routing/TLS hiccup after the app is up → action-required,
+  // never a static green and never "deploy failed".
+  if (opts.status === "action-required") {
+    return {
+      state: "action-required",
+      label: "Action required",
+      tone: "warn",
+      reason: "App is up, but DNS/routing/TLS needs attention. Fix the domain and retry — do not redeploy just for the cert.",
+      checkedAt: new Date(now).toISOString(),
+    }
   }
   if (opts.status === "active" && opts.ssl === "managed") {
     return { state: "active", label: "HTTPS", tone: "ok", checkedAt: new Date(now).toISOString() }
