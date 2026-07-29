@@ -21,6 +21,7 @@ import {
   realReconcile,
   realRestartDatabase,
   realRollback,
+  stopService as realStopService,
 } from "./docker-ops"
 import type { DeployOptions } from "./simulate"
 
@@ -28,6 +29,7 @@ export type { DeployOptions }
 
 export const deployProject = realDeploy
 export const restartService = realRestart
+export const stopService = realStopService
 export const runBackup = realBackup
 export const stopProject = realStop
 export const removeProject = realRemove

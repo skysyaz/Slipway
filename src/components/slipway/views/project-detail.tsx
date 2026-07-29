@@ -20,6 +20,7 @@ import {
   HardDrive,
   Plus,
   RotateCcw,
+  Pause,
   MoreHorizontal,
   Terminal,
   Copy,
@@ -43,13 +44,17 @@ import { useSlipway } from '@/lib/slipway/store'
 import { api, ApiError } from '@/lib/api'
 import { StackGlyph, DbGlyph, StatusDot } from '../icons'
 import { TimeAgo, Duration, Memory, Cpu as CpuFmt, Sparkline, BytesShort, lastV } from '../format'
-import { cn } from '@/lib/utils'
+import { cn, pluralize } from '@/lib/utils'
 import { useToast, toast } from '@/hooks/use-toast'
-import type { Project, Deployment } from '@/lib/slipway/types'
+import { useDismiss } from '@/lib/slipway/dismiss'
+import { deriveCertStatus, reachabilityFromProbe } from '@/lib/status'
+import { validIp } from '@/lib/security'
+import type { Project, Deployment, Service } from '@/lib/slipway/types'
 
 export function ProjectDetailView() {
   const selectedId = useSlipway((s) => s.selectedProjectId)
   const project = useSlipway((s) => s.projects.find((p) => p.id === selectedId))
+  const hydrated = useSlipway((s) => s.hydrated)
   const setView = useSlipway((s) => s.setView)
   const setNewDeploymentOpen = useSlipway((s) => s.setNewDeploymentOpen)
   const triggerDeployment = useSlipway((s) => s.triggerDeployment)
@@ -58,9 +63,41 @@ export function ProjectDetailView() {
   const setAddServiceOpen = useSlipway((s) => s.setAddServiceOpen)
   const setNewBackupOpen = useSlipway((s) => s.setNewBackupOpen)
   const restartService = useSlipway((s) => s.restartService)
-  const [tab, setTab] = React.useState('overview')
+  // META-RULE 1: tab lives in the URL, not local state.
+  const projectTab = useSlipway((s) => s.projectTab)
+  const setProjectTab = useSlipway((s) => s.setProjectTab)
+  const VALID_TABS = ['overview', 'deployments', 'services', 'domains', 'env', 'logs', 'metrics', 'backups', 'settings']
+  const tab = projectTab && VALID_TABS.includes(projectTab) ? projectTab : 'overview'
+
+  // Redirect-race guard: do NOT bounce to projects while the list is still
+  // loading — a refresh lands here before hydrate() resolves, so a naive
+  // `if (!project) redirect` fired before the id could be found. Only redirect
+  // once hydrated AND the id is truly absent.
+  const shouldRedirect = hydrated && !project
+
+  React.useEffect(() => {
+    if (shouldRedirect) setView('projects')
+  }, [shouldRedirect, setView])
+
+  // Scroll the active tab chip into view on change/refresh (tab strip is an
+  // internally-scrollable strip per META-RULE 3).
+  const tabsRef = React.useRef<HTMLDivElement | null>(null)
+  React.useEffect(() => {
+    const el = tabsRef.current?.querySelector('[data-state="active"]')
+    el?.scrollIntoView({ inline: 'center', block: 'nearest' })
+  }, [tab])
 
   if (!project) {
+    if (!hydrated) {
+      return (
+        <div className="space-y-4 animate-pulse">
+          <div className="h-8 w-40 rounded bg-muted" />
+          <div className="h-24 rounded-xl bg-muted" />
+          <div className="h-10 rounded bg-muted" />
+          <div className="h-64 rounded-xl bg-muted" />
+        </div>
+      )
+    }
     return (
       <div className="text-center py-16 text-muted-foreground">
         <p>Project not found.</p>
@@ -74,9 +111,9 @@ export function ProjectDetailView() {
   const SourceIcon = project.source === 'git' ? GitBranch : project.source === 'folder' ? Folder : Boxes
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-5 min-w-0 max-w-full">
       {/* Header */}
-      <div>
+      <div className="min-w-0">
         <button
           onClick={() => setView('projects')}
           className="inline-flex items-center gap-1 text-[12px] text-muted-foreground hover:text-foreground transition-colors"
@@ -84,12 +121,12 @@ export function ProjectDetailView() {
           <ChevronLeft size={13} />
           Projects
         </button>
-        <div className="mt-2 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
-          <div className="flex items-start gap-3">
+        <div className="mt-2 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 min-w-0">
+          <div className="flex items-start gap-3 min-w-0">
             <StackGlyph stack={project.stack} size={44} />
-            <div>
+            <div className="min-w-0">
               <div className="flex items-center gap-2 flex-wrap">
-                <h1 className="text-[22px] font-semibold tracking-tight">{project.name}</h1>
+                <h1 className="text-[22px] font-semibold tracking-tight break-words">{project.name}</h1>
                 <Badge variant="outline" className="text-[10px] capitalize">{project.environment}</Badge>
                 <StatusDot status={project.status} />
                 {project.monorepo && (
@@ -98,15 +135,15 @@ export function ProjectDetailView() {
                   </Badge>
                 )}
               </div>
-              <div className="text-[12px] text-muted-foreground font-mono mt-1 flex items-center gap-2 flex-wrap">
-                <SourceIcon size={11} />
-                {project.repoUrl ?? project.folderPath ?? 'compose import'}
+              <div className="text-[12px] text-muted-foreground font-mono mt-1 flex items-center gap-2 flex-wrap min-w-0">
+                <SourceIcon size={11} className="shrink-0" />
+                <span className="[overflow-wrap:anywhere]">{project.repoUrl ?? project.folderPath ?? 'compose import'}</span>
                 <span className="text-border">·</span>
                 <span>{project.stackLabel}</span>
               </div>
             </div>
           </div>
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center gap-2 shrink-0 flex-wrap">
             <Button variant="outline" size="sm" className="h-9 gap-2" onClick={() => setView('logs')}>
               <Terminal size={13} />
               <span className="hidden sm:inline">Logs</span>
@@ -124,25 +161,12 @@ export function ProjectDetailView() {
       </div>
 
       {project.url && (
-        <div className="rounded-lg border border-border bg-muted/30 p-3 flex items-center gap-3">
-          <Globe size={14} className="text-primary shrink-0" />
-          <a
-            href="#"
-            onClick={(e) => e.preventDefault()}
-            className="text-[13px] font-mono hover:text-primary transition-colors truncate flex-1"
-          >
-            {project.url.replace('https://', '')}
-          </a>
-          <Badge variant="outline" className="text-[10px] h-5 bg-emerald-500/10 text-emerald-500 border-emerald-500/30">
-            <Check size={10} className="mr-0.5" />
-            SSL active
-          </Badge>
-          <ExternalLink size={12} className="text-muted-foreground" />
-        </div>
+        <UrlBadge url={project.url} domains={project.domains} projectId={project.id} />
       )}
 
-      <Tabs value={tab} onValueChange={setTab}>
-        <TabsList className="bg-transparent border-b border-border rounded-none w-full h-auto p-0 justify-start overflow-x-auto">
+      <Tabs value={tab} onValueChange={setProjectTab}>
+        <div ref={tabsRef} className="min-w-0 overflow-x-auto" style={{ scrollbarWidth: 'none', scrollSnapType: 'x proximity' }}>
+        <TabsList className="bg-transparent border-b border-border rounded-none h-auto p-0 justify-start w-max min-w-full">
           <TabsTrigger value="overview" className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent">
             Overview
           </TabsTrigger>
@@ -171,6 +195,7 @@ export function ProjectDetailView() {
             Settings
           </TabsTrigger>
         </TabsList>
+        </div>
 
         <TabsContent value="overview" className="mt-5">
           <OverviewTab project={project} onRollbackClick={(d) => setRollbackTarget(d)} />
@@ -179,7 +204,12 @@ export function ProjectDetailView() {
           <DeploymentsTab projectId={project.id} onRollbackClick={(d) => setRollbackTarget(d)} />
         </TabsContent>
         <TabsContent value="services" className="mt-5">
-          <ServicesTab project={project} onAddService={() => setAddServiceOpen(true)} onRestart={(serviceId) => restartService(project.id, serviceId)} />
+          <ServicesTab
+            project={project}
+            onAddService={() => setAddServiceOpen(true)}
+            onRestart={(serviceId) => restartService(project.id, serviceId)}
+            onOpenLogs={() => setProjectTab('logs')}
+          />
         </TabsContent>
         <TabsContent value="domains" className="mt-5">
           <DomainsTab project={project} onAddDomain={() => setNewDomainOpen(true)} />
@@ -188,7 +218,7 @@ export function ProjectDetailView() {
           <EnvTab project={project} />
         </TabsContent>
         <TabsContent value="logs" className="mt-5">
-          <ProjectLogsTab projectId={project.id} />
+          <ProjectLogsTab project={project} />
         </TabsContent>
         <TabsContent value="metrics" className="mt-5">
           <MetricsTab project={project} />
@@ -200,6 +230,73 @@ export function ProjectDetailView() {
           <SettingsTab project={project} />
         </TabsContent>
       </Tabs>
+    </div>
+  )
+}
+
+function UrlBadge({ url, domains, projectId }: { url: string; domains: Project['domains']; projectId: string }) {
+  const isHttps = url.startsWith('https://')
+  const host = url.replace(/^https?:\/\//, '').split('/')[0].split(':')[0]
+  // R5: octet-range-checked IP detection (shared helper, not a d{1,3} regex).
+  const hostIsIp = validIp(host)
+  const display = url.replace(/^https?:\/\//, '')
+
+  // META-RULE 2: derive cert from the status model — IP mode is NEVER
+  // "Cert pending" and never ACME. Use the best domain row for this host.
+  const dom = domains.find((d) => d.hostname === host || display.startsWith(d.hostname)) ?? domains[0]
+  const cert = deriveCertStatus({
+    hostname: host,
+    ssl: dom?.ssl ?? (isHttps ? 'managed' : 'disabled'),
+    status: dom?.status ?? 'pending',
+    https: isHttps,
+    createdAt: undefined,
+    isIp: hostIsIp,
+  })
+
+  const [probe, setProbe] = React.useState<{ state: string; label: string; tone: string; hint?: string } | null>(null)
+  React.useEffect(() => {
+    let alive = true
+    api
+      .get<{ probe: { state: string; label: string; tone: string; hint?: string } }>(`/api/projects/${projectId}/reachability`)
+      .then((r) => { if (alive) setProbe(r.probe) })
+      .catch(() => {})
+    return () => { alive = false }
+  }, [projectId, url])
+
+  const toneClass: Record<string, string> = {
+    ok: 'bg-emerald-500/10 text-emerald-500 border-emerald-500/30',
+    warn: 'bg-amber-500/10 text-amber-500 border-amber-500/30',
+    error: 'bg-rose-500/10 text-rose-500 border-rose-500/30',
+    neutral: '',
+  }
+  return (
+    <div className="rounded-lg border border-border bg-muted/30 p-3 flex items-center gap-3 min-w-0">
+      <Globe size={14} className="text-primary shrink-0" />
+      <a
+        href={url}
+        target="_blank"
+        rel="noreferrer"
+        className="text-[13px] font-mono hover:text-primary transition-colors truncate flex-1 min-w-0 [overflow-wrap:anywhere]"
+        title={probe?.hint}
+      >
+        {display}
+      </a>
+      {/* reachability chip (server-probed) */}
+      {probe && (
+        <Badge variant="outline" className={cn('text-[10px] h-5 shrink-0', toneClass[probe.tone])} title={probe.hint}>
+          {probe.label}
+        </Badge>
+      )}
+      {/* cert chip (derived; IP never "Cert pending") */}
+      <Badge
+        variant="outline"
+        className={cn('text-[10px] h-5 shrink-0', toneClass[cert.tone])}
+        title={cert.reason}
+      >
+        {cert.state === 'active' && <Check size={10} className="mr-0.5" />}
+        {cert.label}
+      </Badge>
+      <ExternalLink size={12} className="text-muted-foreground shrink-0" />
     </div>
   )
 }
@@ -507,93 +604,281 @@ function DeploymentsTab({ projectId, onRollbackClick }: { projectId: string; onR
   )
 }
 
-function ServicesTab({ project, onAddService, onRestart }: { project: Project; onAddService: () => void; onRestart: (serviceId?: string) => void }) {
+function ServicesTab({
+  project,
+  onAddService,
+  onRestart,
+  onOpenLogs,
+}: {
+  project: Project
+  onAddService: () => void
+  onRestart: (serviceId?: string) => Promise<void>
+  onOpenLogs: (serviceName?: string) => void
+}) {
+  const { toast } = useToast()
+  const restartService = useSlipway((s) => s.restartService)
+  const stopService = useSlipway((s) => s.stopService)
+  const removeService = useSlipway((s) => s.removeService)
+  const triggerDeployment = useSlipway((s) => s.triggerDeployment)
+  const setServiceLogScope = useSlipway((s) => s.setServiceLogScope)
+
+  // Bug 3 root cause: the circular-arrow button had NO onClick and the ⋯ only
+  // toasted "not wired up" — both were no-ops by design, so nothing happened
+  // on tap. Each action below is async with its own loading flag, a try/catch
+  // that surfaces an error toast, and a refetch so Restarts/status stay true.
+  const [busyKey, setBusyKey] = React.useState<string | null>(null)
+  const [menuFor, setMenuFor] = React.useState<string | null>(null)
+  const menuContentRef = React.useRef<HTMLDivElement | null>(null)
+  const menuTriggerRef = React.useRef<HTMLButtonElement | null>(null)
+
+  useDismiss({
+    open: menuFor !== null,
+    onClose: () => setMenuFor(null),
+    contentRef: menuContentRef,
+    triggerRef: menuTriggerRef,
+  })
+
+  const run = async <T,>(key: string, label: string, fn: () => Promise<T>): Promise<T | undefined> => {
+    setBusyKey(key)
+    try {
+      const out = await fn()
+      return out
+    } catch (e) {
+      toast({
+        title: `${label} failed`,
+        description: e instanceof ApiError ? e.message : e instanceof Error ? e.message : 'error',
+        variant: 'destructive',
+      })
+      return undefined
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
+  const doRestart = (svc: Service) =>
+    run(`restart:${svc.id}`, 'Restart', async () => {
+      await restartService(project.id, svc.id)
+      toast({ title: 'Service restarted', description: `${svc.name} restarted.` })
+    })
+  const doStop = (svc: Service) =>
+    run(`stop:${svc.id}`, 'Stop', async () => {
+      await stopService(project.id, svc.id)
+      toast({ title: 'Service stopped', description: `${svc.name} stopped.` })
+    })
+  const doRedeploy = (svc: Service) =>
+    run(`redeploy:${svc.id}`, 'Redeploy', async () => {
+      await triggerDeployment(project.id)
+      toast({ title: 'Redeploy started', description: `${project.name} is redeploying.` })
+    })
+  const doRemove = (svc: Service) =>
+    run(`remove:${svc.id}`, 'Remove', async () => {
+      if (!window.confirm(`Remove service "${svc.name}" from ${project.name}? Its container is left running on the host.`)) return
+      await removeService(project.id, svc.id)
+      setMenuFor(null)
+      toast({ title: 'Service removed', description: `${svc.name} removed from ${project.name}.` })
+    })
+
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
+    <div className="space-y-4 min-w-0">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="min-w-0">
           <h3 className="text-[15px] font-semibold">Services</h3>
           <p className="text-[12px] text-muted-foreground mt-0.5">
-            {project.services.length} services defined in this project. Each can be scaled, restarted, or inspected independently.
+            {pluralize(project.services.length, 'service')} defined in this project. Each can be scaled, restarted, or inspected independently.
           </p>
         </div>
-        <Button variant="outline" size="sm" className="h-9 gap-2" onClick={onAddService}>
+        <Button variant="outline" size="sm" className="h-9 gap-2 shrink-0" onClick={onAddService}>
           <Plus size={13} />
           Add service
         </Button>
       </div>
-      <div className="rounded-xl border border-border bg-card overflow-hidden">
-        {project.services.map((svc, i) => (
-          <div
-            key={svc.id}
-            className={cn('p-4', i !== project.services.length - 1 && 'border-b border-border')}
-          >
-            <div className="flex items-start gap-3">
-              <div className="w-9 h-9 rounded-lg bg-muted flex items-center justify-center shrink-0">
-                {svc.kind === 'app' ? (
-                  <Rocket size={15} />
-                ) : svc.kind === 'worker' ? (
-                  <Cpu size={15} />
-                ) : svc.kind === 'database' ? (
-                  <Boxes size={15} />
-                ) : (
-                  <Clock size={15} />
-                )}
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-[14px] font-semibold">{svc.name}</span>
-                  <Badge variant="outline" className="text-[10px] capitalize h-5">{svc.kind}</Badge>
-                  <StatusDot status={svc.status} />
+      <div className="rounded-xl border border-border bg-card overflow-hidden w-full max-w-full">
+        {project.services.length === 0 && (
+          <div className="p-8 text-center text-[13px] text-muted-foreground">No services yet.</div>
+        )}
+        {project.services.map((svc, i) => {
+          const restarting = busyKey === `restart:${svc.id}`
+          const stopping = busyKey === `stop:${svc.id}`
+          const redeploying = busyKey === `redeploy:${svc.id}`
+          const removing = busyKey === `remove:${svc.id}`
+          const stopped = svc.status === 'stopped'
+          const menuOpen = menuFor === svc.id
+          return (
+            <div
+              key={svc.id}
+              className={cn('p-4 min-w-0', i !== project.services.length - 1 && 'border-b border-border')}
+            >
+              {/* identity above stats; action row wraps (Bug 4) */}
+              <div className="flex flex-col sm:flex-row sm:items-start gap-3 min-w-0">
+                <div className="flex items-start gap-3 flex-1 min-w-0">
+                  <div className="w-9 h-9 rounded-lg bg-muted flex items-center justify-center shrink-0">
+                    {svc.kind === 'app' ? (
+                      <Rocket size={15} />
+                    ) : svc.kind === 'worker' ? (
+                      <Cpu size={15} />
+                    ) : svc.kind === 'database' ? (
+                      <Boxes size={15} />
+                    ) : (
+                      <Clock size={15} />
+                    )}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-[14px] font-semibold break-words">{svc.name}</span>
+                      <Badge variant="outline" className="text-[10px] capitalize h-5">{svc.kind}</Badge>
+                      <StatusDot status={svc.status} />
+                    </div>
+                    <div className="text-[11px] text-muted-foreground font-mono mt-1 truncate [overflow-wrap:anywhere]">{svc.image}</div>
+                  </div>
                 </div>
-                <div className="text-[11px] text-muted-foreground font-mono mt-1 truncate">{svc.image}</div>
+
+                <div className="relative flex items-center gap-1 shrink-0 self-start">
+                  {/* circular-arrow = RESTART (real action, spinner, toast) */}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-11 w-11 sm:h-8 sm:w-8 p-0"
+                    title={stopped ? 'Start service' : 'Restart service'}
+                    aria-label={`${stopped ? 'Start' : 'Restart'} service ${svc.name}`}
+                    disabled={restarting}
+                    onClick={() => void doRestart(svc)}
+                  >
+                    {restarting ? <Loader2 size={13} className="animate-spin" /> : <RotateCcw size={13} />}
+                  </Button>
+                  {/* ⋯ kebab menu — wired to the shared dismiss layer (Bug 3) */}
+                  <Button
+                    ref={(el) => {
+                      if (menuOpen) menuTriggerRef.current = el
+                    }}
+                    variant="ghost"
+                    size="sm"
+                    className="h-11 w-11 sm:h-8 sm:w-8 p-0"
+                    title="Service actions"
+                    aria-label={`Service actions for ${svc.name}`}
+                    aria-haspopup="menu"
+                    aria-expanded={menuOpen}
+                    onClick={() => setMenuFor(menuOpen ? null : svc.id)}
+                  >
+                    <MoreHorizontal size={14} />
+                  </Button>
+                  {menuOpen && (
+                    <div
+                      ref={menuContentRef}
+                      role="menu"
+                      aria-label={`Actions for ${svc.name}`}
+                      className="absolute right-0 top-11 sm:top-8 z-50 min-w-[180px] rounded-lg border border-border bg-popover shadow-lg p-1"
+                    >
+                      <ServiceMenuItem
+                        label={stopped ? 'Start' : 'Restart'}
+                        icon={<RotateCcw size={12} />}
+                        loading={restarting}
+                        onClick={() => {
+                          setMenuFor(null)
+                          void doRestart(svc)
+                        }}
+                      />
+                      <ServiceMenuItem
+                        label="View logs"
+                        icon={<ScrollText size={12} />}
+                        onClick={() => {
+                          setMenuFor(null)
+                          setServiceLogScope(svc.name)
+                          onOpenLogs(svc.name)
+                        }}
+                      />
+                      <ServiceMenuItem
+                        label="Redeploy"
+                        icon={<Rocket size={12} />}
+                        loading={redeploying}
+                        onClick={() => {
+                          setMenuFor(null)
+                          void doRedeploy(svc)
+                        }}
+                      />
+                      <ServiceMenuItem
+                        label="Stop"
+                        icon={<Pause size={12} />}
+                        loading={stopping}
+                        disabled={stopped}
+                        disabledReason="Service is already stopped"
+                        onClick={() => {
+                          setMenuFor(null)
+                          void doStop(svc)
+                        }}
+                      />
+                      <ServiceMenuItem
+                        label="Remove"
+                        icon={<Trash2 size={12} />}
+                        destructive
+                        loading={removing}
+                        onClick={() => void doRemove(svc)}
+                      />
+                    </div>
+                  )}
+                </div>
               </div>
-              <div className="flex items-center gap-1 shrink-0">
-                <Button variant="ghost" size="sm" className="h-8 w-8 p-0" title="Restart service" onClick={() => onRestart(svc.id)}>
-                  <RotateCcw size={13} />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-8 w-8 p-0"
-                  title="Service actions"
-                  onClick={() =>
-                    toast({
-                      title: 'Not available from the dashboard yet',
-                      description: `Editing, scaling and deleting ${svc.name} individually isn't wired up. Restart works (the button to the left); for the rest use the REST API or docker on the host.`,
-                    })
-                  }
-                >
-                  <MoreHorizontal size={14} />
-                </Button>
+              <div className="mt-3 grid grid-cols-2 sm:grid-cols-5 gap-3 text-[11px]">
+                <div className="min-w-0">
+                  <div className="text-muted-foreground">Replicas</div>
+                  <div className="font-mono mt-0.5 text-[13px]">{svc.replicas}x</div>
+                </div>
+                <div className="min-w-0">
+                  <div className="text-muted-foreground">Memory</div>
+                  <div className="font-mono mt-0.5 text-[13px]"><Memory mb={svc.memoryMb} /></div>
+                </div>
+                <div className="min-w-0">
+                  <div className="text-muted-foreground">CPU</div>
+                  <div className="font-mono mt-0.5 text-[13px]"><CpuFmt milli={svc.cpuMilli} /></div>
+                </div>
+                <div className="min-w-0">
+                  <div className="text-muted-foreground">Port</div>
+                  <div className="font-mono mt-0.5 text-[13px]">{svc.port ?? '—'}</div>
+                </div>
+                <div className="min-w-0">
+                  <div className="text-muted-foreground">Restarts</div>
+                  <div className={cn('font-mono mt-0.5 text-[13px]', svc.restarts > 0 && 'text-amber-500')}>{svc.restarts}</div>
+                </div>
               </div>
             </div>
-            <div className="mt-3 grid grid-cols-2 sm:grid-cols-5 gap-3 text-[11px]">
-              <div>
-                <div className="text-muted-foreground">Replicas</div>
-                <div className="font-mono mt-0.5 text-[13px]">{svc.replicas}x</div>
-              </div>
-              <div>
-                <div className="text-muted-foreground">Memory</div>
-                <div className="font-mono mt-0.5 text-[13px]"><Memory mb={svc.memoryMb} /></div>
-              </div>
-              <div>
-                <div className="text-muted-foreground">CPU</div>
-                <div className="font-mono mt-0.5 text-[13px]"><CpuFmt milli={svc.cpuMilli} /></div>
-              </div>
-              <div>
-                <div className="text-muted-foreground">Port</div>
-                <div className="font-mono mt-0.5 text-[13px]">{svc.port ?? '—'}</div>
-              </div>
-              <div>
-                <div className="text-muted-foreground">Restarts</div>
-                <div className={cn('font-mono mt-0.5 text-[13px]', svc.restarts > 0 && 'text-amber-500')}>{svc.restarts}</div>
-              </div>
-            </div>
-          </div>
-        ))}
+          )
+        })}
       </div>
     </div>
+  )
+}
+
+function ServiceMenuItem({
+  label,
+  icon,
+  onClick,
+  loading,
+  disabled,
+  disabledReason,
+  destructive,
+}: {
+  label: string
+  icon: React.ReactNode
+  onClick: () => void
+  loading?: boolean
+  disabled?: boolean
+  disabledReason?: string
+  destructive?: boolean
+}) {
+  return (
+    <button
+      role="menuitem"
+      disabled={disabled || loading}
+      title={disabled ? disabledReason : undefined}
+      onClick={onClick}
+      className={cn(
+        'w-full flex items-center gap-2 rounded-md px-3 py-2.5 sm:py-2 text-[12px] text-left min-h-[44px] sm:min-h-0 transition-colors',
+        destructive ? 'text-rose-500 hover:bg-rose-500/10' : 'hover:bg-accent',
+        disabled && 'opacity-50 cursor-not-allowed',
+      )}
+    >
+      {loading ? <Loader2 size={12} className="animate-spin shrink-0" /> : <span className="shrink-0">{icon}</span>}
+      <span className="flex-1">{label}</span>
+    </button>
   )
 }
 
@@ -615,7 +900,7 @@ function DomainsTab({ project, onAddDomain }: { project: Project; onAddDomain: (
         <div>
           <h3 className="text-[15px] font-semibold">Domains & SSL</h3>
           <p className="text-[12px] text-muted-foreground mt-0.5">
-            Slipway records domains and checks SSL. The reverse proxy (Traefik) is managed separately, so routing is not changed here.
+            Slipway routes these hostnames via Traefik and provisions/renews TLS.
           </p>
         </div>
         <Button variant="outline" size="sm" className="h-9 gap-2" onClick={onAddDomain}>
@@ -623,12 +908,12 @@ function DomainsTab({ project, onAddDomain }: { project: Project; onAddDomain: (
           Add domain
         </Button>
       </div>
-      <div className="rounded-xl border border-border bg-card overflow-hidden">
+      <div className="rounded-xl border border-border bg-card overflow-hidden w-full max-w-full">
         {project.domains.length === 0 && (
           <div className="p-8 text-center text-[13px] text-muted-foreground">No domains yet.</div>
         )}
         {project.domains.map((dom, i) => (
-          <div key={dom.id} className={cn('p-4 flex items-center gap-3', i !== project.domains.length - 1 && 'border-b border-border')}>
+          <div key={dom.id} className={cn('p-4 flex items-center gap-3 min-w-0', i !== project.domains.length - 1 && 'border-b border-border')}>
             <div className="w-9 h-9 rounded-lg bg-muted flex items-center justify-center shrink-0">
               <Globe size={15} />
             </div>
@@ -805,40 +1090,76 @@ function EnvTab({ project }: { project: Project }) {
   )
 }
 
-function ProjectLogsTab({ projectId }: { projectId: string }) {
+function ProjectLogsTab({ project }: { project: Project }) {
   const logs = useSlipway((s) => s.logs)
   const [paused, setPaused] = React.useState(false)
   const [filter, setFilter] = React.useState<string>('all')
   const containerRef = React.useRef<HTMLDivElement>(null)
-  // ponytail: real logs arrive via the /api/logs/stream SSE feed (see LogsView),
-  // so there is nothing to poll here. The old setInterval(pushLog, 1200) was
-  // firing a no-op every 1.2s — dropped (bug 7 leaked-interval cleanup).
-  void projectId
+
+  // Bug 2 root cause: this tab subscribed to the GLOBAL log buffer and its
+  // service chips were a hardcoded list, so every project's Logs tab showed
+  // every running container's lines. Scope by THIS project: containers are
+  // named `slipway-<slug>-<service>` by containerName() at deploy time, so a
+  // line belongs to this project when its service name carries the project
+  // slug, or matches a service name on this project.
+  const projectServices = React.useMemo(
+    () => Array.from(new Set(project.services.map((s) => s.name))).sort(),
+    [project.services]
+  )
+  const belongsToProject = React.useCallback(
+    (lineService: string) => {
+      const s = String(lineService)
+      if (s.includes(project.slug)) return true
+      return projectServices.some((name) => s === name || s.endsWith(`-${name}`))
+    },
+    [project.slug, projectServices]
+  )
+  const projectLogs = React.useMemo(() => logs.filter((l) => belongsToProject(l.service)), [logs, belongsToProject])
+
+  // Chips come from THIS project's services only.
+  const chips = React.useMemo(() => ['all', ...projectServices], [projectServices])
+
+  // View-logs from a service card lands here scoped to that service.
+  const serviceLogScope = useSlipway((s) => s.serviceLogScope)
+  const setServiceLogScope = useSlipway((s) => s.setServiceLogScope)
+  React.useEffect(() => {
+    if (serviceLogScope && projectServices.includes(serviceLogScope)) setFilter(serviceLogScope)
+  }, [serviceLogScope, projectServices])
+  const pickFilter = (f: string) => {
+    setFilter(f)
+    if (serviceLogScope) setServiceLogScope(null)
+  }
 
   React.useEffect(() => {
     if (containerRef.current && !paused) {
       containerRef.current.scrollTop = containerRef.current.scrollHeight
     }
-  }, [logs, paused])
+  }, [projectLogs, paused])
 
-  const filtered = filter === 'all' ? logs : logs.filter((l) => l.service === filter)
+  const filtered = filter === 'all' ? projectLogs : projectLogs.filter((l) => l.service === filter || l.service.endsWith(`-${filter}`))
+
+  // Render ONLY the message after the level token — the stream already strips
+  // the docker timestamp and sanitizes control chars server-side, so we don't
+  // re-print the timestamp that would duplicate the one in the Time column.
+  const messageOnly = (m: string) => m.replace(/^\s*(INFO|WARN|ERROR|DEBUG|CRITICAL|SYSTEM)\s+/, '')
 
   const levelColor: Record<string, string> = {
     info: 'text-emerald-500',
     warn: 'text-amber-500',
     error: 'text-rose-500',
+    critical: 'text-rose-600',
     debug: 'text-sky-500',
     system: 'text-muted-foreground',
   }
 
   return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          {['all', 'api', 'web', 'worker', 'ingest', 'scheduler', 'slipway'].map((f) => (
+    <div className="space-y-3 min-w-0">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-1 flex-wrap">
+          {chips.map((f) => (
             <button
               key={f}
-              onClick={() => setFilter(f)}
+              onClick={() => pickFilter(f)}
               className={cn(
                 'px-2.5 h-7 rounded text-[11px] font-mono transition-colors',
                 filter === f ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent/50',
@@ -857,26 +1178,26 @@ function ProjectLogsTab({ projectId }: { projectId: string }) {
           >
             {paused ? 'Resume' : 'Pause'}
           </Button>
-          <Button variant="outline" size="sm" className="h-8 text-[11px]" onClick={() => toast({ title: 'Logs exported', description: 'logs.txt download started.' })}>
-            <ScrollText size={11} className="mr-1" />
-            Export
-          </Button>
         </div>
       </div>
       <div
         ref={containerRef}
-        className="rounded-xl border border-border bg-[oklch(0.12_0.005_240)] font-mono text-[11.5px] h-[480px] overflow-y-auto p-3"
+        className="rounded-xl border border-border bg-[oklch(0.12_0.005_240)] font-mono text-[11.5px] h-[480px] overflow-y-auto p-3 min-w-0"
       >
-        {filtered.map((l) => (
-          <div key={l.id} className="log-line flex gap-3 hover:bg-white/5 px-1 -mx-1 rounded">
-            <span className="text-muted-foreground/60 shrink-0 w-20">
-              {new Date(l.ts).toISOString().slice(11, 23)}
-            </span>
-            <span className={cn('shrink-0 w-14 uppercase', levelColor[l.level])}>{l.level}</span>
-            <span className="shrink-0 w-20 text-muted-foreground/80">{l.service}</span>
-            <span className="flex-1 break-all">{l.message}</span>
-          </div>
-        ))}
+        {filtered.length === 0 ? (
+          <div className="p-8 text-center text-[12px] text-muted-foreground">No logs yet for {project.name}.</div>
+        ) : (
+          filtered.map((l) => (
+            <div key={l.id} className="log-line grid grid-cols-[80px_52px_80px_minmax(0,1fr)] gap-3 hover:bg-white/5 px-1 -mx-1 rounded">
+              <span className="text-muted-foreground/60 whitespace-nowrap tabular-nums">
+                {new Date(l.ts).toISOString().slice(11, 23)}
+              </span>
+              <span className={cn('uppercase whitespace-nowrap', levelColor[l.level])}>{l.level}</span>
+              <span className="text-muted-foreground/80 truncate">{l.service}</span>
+              <span className="min-w-0 whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{messageOnly(l.message)}</span>
+            </div>
+          ))
+        )}
       </div>
     </div>
   )

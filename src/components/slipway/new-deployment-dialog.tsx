@@ -351,7 +351,7 @@ function SourceStep(props: any) {
               id="repo-url"
               value={props.repoUrl}
               onChange={(e) => props.setRepoUrl(e.target.value)}
-              placeholder="github.com/org/repo"
+              placeholder="https://github.com/org/repo"
               className="font-mono text-[13px]"
             />
             <p className="text-[11px] text-muted-foreground">

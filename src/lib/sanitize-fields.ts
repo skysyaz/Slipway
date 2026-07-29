@@ -15,7 +15,7 @@
  * dump, a false negative leaks a credential.
  */
 export const SECRET_KEY_PATTERN =
-  /(password|passwd|secret|token|credential|apikey|api_key|private)/i
+  /(password|passwd|secret|token|credential|apikey|api_key|private|(^|[._:-])pass$)/i
 
 export const REDACTED = "[redacted]"
 
@@ -25,6 +25,34 @@ export const REDACTED = "[redacted]"
  */
 export function redactSecretValue(key: string, value: string): string {
   return SECRET_KEY_PATTERN.test(key) ? REDACTED : value
+}
+
+/**
+ * Redact credential material that may sit inside a URL (userinfo, token query
+ * params). Used by the config export so webhook destinations don't leak
+ * Discord/Slack/PagerDuty secrets that live in the path or query string.
+ */
+export function redactSecretUrl(url: string): string {
+  const raw = String(url || "")
+  if (!raw) return raw
+  try {
+    const u = new URL(raw)
+    if (u.username || u.password) {
+      u.username = u.username ? "redacted" : ""
+      u.password = u.password ? "redacted" : ""
+    }
+    for (const key of ["token", "access_token", "key", "api_key", "apikey", "secret", "password", "auth"]) {
+      if (u.searchParams.has(key)) u.searchParams.set(key, REDACTED)
+    }
+    // Discord/Slack-style webhook paths embed a secret after /webhooks/ or /hooks/
+    u.pathname = u.pathname.replace(
+      /(\/hooks\/|\/webhooks\/)[^/]+(\/[^/]+)?/gi,
+      (_m, prefix: string, rest?: string) => `${prefix}${REDACTED}${rest ? `/${REDACTED}` : ""}`
+    )
+    return u.toString()
+  } catch {
+    return REDACTED
+  }
 }
 
 /**

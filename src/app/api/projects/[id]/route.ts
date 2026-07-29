@@ -3,7 +3,7 @@ import { db } from "@/lib/db"
 import { serializeProject } from "@/lib/serialize"
 import { stopProject, removeProject, updateContainer } from "@/lib/ops"
 import { recordActivity } from "@/lib/notify"
-import { parseGitSource, canonicalGitUrl } from "@/lib/git-source"
+import { normalizeGitSource } from "@/lib/git-deploy"
 
 export const dynamic = "force-dynamic"
 
@@ -58,19 +58,19 @@ export const PATCH = route(async (req, params, auth) => {
     if (k in body) data[k] = body[k]
   }
   // Validate a repository URL up front rather than letting the next deploy fail
-  // at checkout with a git error.
+  // at checkout with a git error. Uses the same normaliser POST /api/projects
+  // uses, so a URL edited here and one entered at creation are stored alike.
   if (typeof data.repoUrl === "string" && data.repoUrl.trim()) {
-    const parsed = parseGitSource(String(data.repoUrl))
-    if (!parsed) {
+    const git = normalizeGitSource(String(data.repoUrl))
+    if (!git) {
       return new Response(
         JSON.stringify({
-          error: `"${data.repoUrl}" isn't a Git repository URL. Use something like https://github.com/owner/repo.`,
+          error: `Not a usable git URL: "${data.repoUrl}". Use github.com/org/repo or a full https:// URL.`,
         }),
         { status: 400 }
       )
     }
-    // store the canonical clone URL so every later deploy agrees on it
-    data.repoUrl = canonicalGitUrl(parsed)
+    data.repoUrl = `https://${git.host}/${git.owner}/${git.repo}`
   }
 
   if (data.slug && data.slug !== existing.slug) {

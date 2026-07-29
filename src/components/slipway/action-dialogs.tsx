@@ -57,12 +57,24 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
 }
 
 function useSubmit() {
+  const { toast } = useToast()
   const [submitting, setSubmitting] = React.useState(false)
-  const run = async <T,>(fn: () => T | Promise<T>): Promise<T> => {
+  // ponytail: callers used to `run(() => { void api.post(...); toast(success) })`
+  // — the promise was discarded, so the dialog closed and toasted success
+  // before the request finished (or failed). Always await the callback and
+  // surface failures instead of claiming success.
+  const run = async <T,>(fn: () => T | Promise<T>): Promise<T | undefined> => {
     setSubmitting(true)
     try {
       await new Promise((r) => setTimeout(r, 400))
       return await fn()
+    } catch (e) {
+      toast({
+        title: 'Request failed',
+        description: e instanceof Error ? e.message : String(e),
+        variant: 'destructive',
+      })
+      return undefined
     } finally {
       setSubmitting(false)
     }
@@ -246,10 +258,7 @@ export function NewDatabaseDialog() {
                 {creds.dbName && <CredRow label="Database" value={creds.dbName} mono />}
                 <CredRow label="Host" value={`${creds.host || 'localhost'}:${creds.port}`} mono />
                 <p className="text-[10px] text-muted-foreground leading-snug">
-                  You can reveal the password again any time from the database&apos;s ⋯ menu → Show credentials.
-                </p>
-                <p className="text-[10px] text-amber-600 leading-snug">
-                  From outside the server, use the server&apos;s public IP (not {creds.host || 'localhost'}) and open TCP port {creds.port} in your firewall. See ⋯ → Show credentials for the external connection string.
+                  Bound on 127.0.0.1 — reachable from this host. You can reveal the password again any time from the database&apos;s ⋯ menu → Show credentials.
                 </p>
               </div>
               <Button onClick={() => setOpen(false)} className="gap-2">Done</Button>
@@ -409,8 +418,8 @@ export function NewVolumeDialog() {
             <div className="flex items-center gap-2.5">
               <ShieldCheck size={15} className="text-emerald-500" />
               <div>
-                <div className="text-[12px] font-medium">Encrypt at rest</div>
-                <div className="text-[11px] text-muted-foreground">AES-256-GCM</div>
+                <div className="text-[12px] font-medium">Mark as encrypted</div>
+                <div className="text-[11px] text-muted-foreground">Intent only — Docker local volumes are not encrypted by Slipway</div>
               </div>
             </div>
             <Switch checked={encrypted} onCheckedChange={setEncrypted} />
@@ -421,9 +430,10 @@ export function NewVolumeDialog() {
           <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
           <Button
             disabled={!name || submitting}
-            onClick={() => run(() => {
-              addVolume({ name, mountPath: mount, sizeGb: parseInt(size), type, server, projectId: projectId || undefined, encrypted })
-              toast({ title: 'Volume created', description: `${name} mounted at ${mount}.` })
+            onClick={() => void run(async () => {
+              await addVolume({ name, mountPath: mount, sizeGb: parseInt(size), type, server, projectId: projectId || undefined, encrypted })
+              toast({ title: 'Volume created', description: `${name} created${encrypted ? ' (encryption is recorded as intent — Docker local volumes are not encrypted by Slipway).' : ''}.` })
+              setOpen(false)
             })}
             className="gap-2"
           >
@@ -439,6 +449,10 @@ export function NewVolumeDialog() {
 // =============================================================================
 // Add Domain dialog
 // =============================================================================
+const ipDash = (ip: string) => String(ip).trim().replace(/\./g, '-')
+const HOST_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i
+const IP_RE = /^(\d{1,3}\.){3}\d{1,3}$/
+
 export function NewDomainDialog() {
   const open = useSlipway((s) => s.newDomainOpen)
   const setOpen = useSlipway((s) => s.setNewDomainOpen)
@@ -448,15 +462,50 @@ export function NewDomainDialog() {
   const { toast } = useToast()
   const { submitting, run } = useSubmit()
 
+  const [mode, setMode] = React.useState<'sslip' | 'custom' | 'ip'>('custom')
   const [hostname, setHostname] = React.useState('')
   const [projectId, setProjectId] = React.useState(selectedProjectId || projects[0]?.id || '')
   const [type, setType] = React.useState<'primary' | 'redirect' | 'api'>('primary')
   const [ssl, setSsl] = React.useState(true)
+  const [ipTls, setIpTls] = React.useState<'selfsigned' | 'http'>('selfsigned')
+  const [publicIp, setPublicIp] = React.useState<string | null>(null)
 
   React.useEffect(() => {
-    if (!open) { setHostname(''); setType('primary'); setSsl(true) }
+    if (!open) return
+    void api.get<{ publicIp: string | null }>('/api/server-info').then((r) => setPublicIp(r.publicIp)).catch(() => setPublicIp(null))
+  }, [open])
+
+  React.useEffect(() => {
+    if (!open) { setHostname(''); setType('primary'); setSsl(true); setMode('custom'); setIpTls('selfsigned') }
     else if (selectedProjectId) setProjectId(selectedProjectId)
   }, [open, selectedProjectId])
+
+  const project = projects.find((p) => p.id === projectId)
+
+  // Resolve the effective hostname per mode.
+  const sslipHost = publicIp && project ? `${project.slug}.${ipDash(publicIp)}.sslip.io` : ''
+  const effectiveHost =
+    mode === 'sslip' ? sslipHost : mode === 'ip' ? publicIp || '' : hostname.trim()
+
+  const validateCustom = (h: string): string => {
+    if (!h) return ''
+    if (/\s/.test(h)) return 'No spaces allowed.'
+    if (/^[a-z]+:\/\//i.test(h)) return 'Remove the scheme (https://).'
+    if (h.includes('/')) return 'Remove the path.'
+    if (h.includes(':')) return 'Remove the port.'
+    if (IP_RE.test(h)) return 'A bare IP is "Server IP (direct)" mode, not a custom domain.'
+    if (!HOST_RE.test(h)) return 'Not a valid hostname (e.g. app.example.com).'
+    return ''
+  }
+  const customError = mode === 'custom' ? validateCustom(hostname) : ''
+
+  const canSubmit =
+    !!projectId &&
+    (mode === 'custom'
+      ? hostname.trim().length > 0 && !customError
+      : mode === 'sslip'
+        ? !!sslipHost
+        : !!publicIp)
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -467,19 +516,72 @@ export function NewDomainDialog() {
             Add domain
           </DialogTitle>
           <DialogDescription>
-            Route a hostname to a project. Slipway provisions and renews TLS certificates via Let's Encrypt automatically.
+            Route a hostname to a project. Slipway writes the Traefik route and provisions TLS.
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4 py-2">
-          <Field label="Hostname" hint="The full domain or subdomain. DNS A record must point at your Slipway server.">
-            <Input
-              value={hostname}
-              onChange={(e) => setHostname(e.target.value)}
-              placeholder="api.helix-api.com"
-              className="font-mono text-[13px]"
-            />
+          <Field label="Domain source">
+            <div className="grid grid-cols-3 gap-2">
+              {(
+                [
+                  { id: 'sslip', label: 'Free subdomain', sub: 'sslip.io' },
+                  { id: 'custom', label: 'My own domain', sub: 'A record' },
+                  { id: 'ip', label: 'Server IP', sub: 'direct' },
+                ] as const
+              ).map((m) => {
+                const disabled = m.id === 'sslip' && !publicIp
+                return (
+                  <button
+                    key={m.id}
+                    type="button"
+                    disabled={disabled}
+                    onClick={() => setMode(m.id)}
+                    title={disabled ? "Set the server's public IP in Settings" : undefined}
+                    className={cn(
+                      'rounded-lg border p-2.5 text-left transition-colors',
+                      mode === m.id ? 'border-primary bg-primary/10' : 'border-border hover:bg-accent',
+                      disabled && 'opacity-50 cursor-not-allowed'
+                    )}
+                  >
+                    <div className="text-[12px] font-medium">{m.label}</div>
+                    <div className="text-[10px] text-muted-foreground">{m.sub}</div>
+                  </button>
+                )
+              })}
+            </div>
           </Field>
+
+          {mode === 'sslip' && (
+            <Field label="Hostname" hint="No DNS setup needed — points at your server via sslip.io. TLS via Let's Encrypt (HTTP-01); sslip.io is shared so rate-limits may apply.">
+              <Input readOnly value={sslipHost || 'Set the server\'s public IP in Settings'} className="font-mono text-[13px] bg-muted/40" />
+            </Field>
+          )}
+
+          {mode === 'custom' && (
+            <Field
+              label="Hostname"
+              hint={
+                publicIp
+                  ? `Add an A record pointing at ${publicIp}. On Cloudflare, set DNS-only (grey cloud) for HTTP-01, or use DNS-01.`
+                  : 'Add an A record pointing at your server IP. On Cloudflare, set DNS-only (grey cloud) for HTTP-01, or use DNS-01.'
+              }
+            >
+              <Input
+                value={hostname}
+                onChange={(e) => setHostname(e.target.value)}
+                placeholder="app.example.com"
+                className="font-mono text-[13px]"
+              />
+              {customError && <p className="text-[11px] text-rose-500 mt-1">{customError}</p>}
+            </Field>
+          )}
+
+          {mode === 'ip' && (
+            <Field label="Hostname" hint="Public CAs (incl. Let's Encrypt) do NOT issue certificates for bare IPs.">
+              <Input readOnly value={publicIp || 'Set the server\'s public IP in Settings'} className="font-mono text-[13px] bg-muted/40" />
+            </Field>
+          )}
 
           <div className="grid grid-cols-2 gap-3">
             <Field label="Project">
@@ -504,25 +606,61 @@ export function NewDomainDialog() {
             </Field>
           </div>
 
-          <div className="flex items-center justify-between rounded-lg border border-border p-3">
-            <div className="flex items-center gap-2.5">
-              <ShieldCheck size={15} className="text-emerald-500" />
-              <div>
-                <div className="text-[12px] font-medium">Provision SSL (Let's Encrypt)</div>
-                <div className="text-[11px] text-muted-foreground">Auto-renewed · HTTP→HTTPS redirect enabled</div>
+          {mode !== 'ip' ? (
+            <div className="flex items-center justify-between rounded-lg border border-border p-3">
+              <div className="flex items-center gap-2.5">
+                <ShieldCheck size={15} className="text-emerald-500" />
+                <div>
+                  <div className="text-[12px] font-medium">Provision SSL (Let's Encrypt)</div>
+                  <div className="text-[11px] text-muted-foreground">Auto-renewed · HTTP→HTTPS redirect enabled</div>
+                </div>
+              </div>
+              <Switch checked={ssl} onCheckedChange={setSsl} />
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <div className="text-[12px] font-medium">Encryption</div>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIpTls('selfsigned')}
+                  className={cn('rounded-lg border p-3 text-left transition-colors', ipTls === 'selfsigned' ? 'border-amber-500 bg-amber-500/10' : 'border-border hover:bg-accent')}
+                >
+                  <div className="text-[12px] font-medium flex items-center gap-1.5"><ShieldCheck size={12} className="text-amber-500" />Self-signed HTTPS</div>
+                  <div className="text-[10px] text-amber-600 mt-0.5">Browsers show a security warning; fine for internal/admin.</div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIpTls('http')}
+                  className={cn('rounded-lg border p-3 text-left transition-colors', ipTls === 'http' ? 'border-primary bg-primary/10' : 'border-border hover:bg-accent')}
+                >
+                  <div className="text-[12px] font-medium">Plain HTTP</div>
+                  <div className="text-[10px] text-muted-foreground mt-0.5">Not encrypted.</div>
+                </button>
               </div>
             </div>
-            <Switch checked={ssl} onCheckedChange={setSsl} />
-          </div>
+          )}
         </div>
 
         <DialogFooter>
           <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
           <Button
-            disabled={!hostname || !projectId || submitting}
-            onClick={() => run(() => {
-              addDomain(projectId, hostname, type, ssl)
-              toast({ title: 'Domain added', description: `${hostname} routed to project. SSL provisioning started.` })
+            disabled={!canSubmit || submitting}
+            onClick={() => void run(async () => {
+              const useTls = mode === 'ip' ? ipTls === 'selfsigned' : ssl
+              await addDomain(projectId, effectiveHost, type, useTls)
+              toast({
+                title: 'Domain added',
+                description:
+                  mode === 'ip'
+                    ? ipTls === 'selfsigned'
+                      ? `${effectiveHost} routed with a self-signed cert.`
+                      : `${effectiveHost} routed over plain HTTP.`
+                    : ssl
+                      ? `${effectiveHost} routed; Let's Encrypt will issue the cert once DNS resolves.`
+                      : `${effectiveHost} routed over plain HTTP.`,
+              })
+              setOpen(false)
             })}
             className="gap-2"
           >
@@ -600,9 +738,10 @@ export function NewBackupDialog() {
           <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
           <Button
             disabled={!target || submitting}
-            onClick={() => run(() => {
-              runBackup(target, targetKind)
+            onClick={() => void run(async () => {
+              await runBackup(target, targetKind)
               toast({ title: 'Backup started', description: `${target} backup is running.` })
+              setOpen(false)
             })}
             className="gap-2"
           >
@@ -699,9 +838,10 @@ export function NewBackupScheduleDialog() {
           <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
           <Button
             disabled={!target || submitting}
-            onClick={() => run(() => {
-              addBackupSchedule(target, schedule, parseInt(retention))
+            onClick={() => void run(async () => {
+              await addBackupSchedule(target, schedule, parseInt(retention))
               toast({ title: 'Schedule created', description: `${target} will back up on schedule.` })
+              setOpen(false)
             })}
             className="gap-2"
           >
@@ -766,9 +906,9 @@ export function NewPreviewDialog() {
           <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
           <Button
             disabled={!projectId || !branch || submitting}
-            onClick={() => run(() => {
+            onClick={() => void run(async () => {
               const project = projects.find((p) => p.id === projectId)
-              void createAndDeploy({ existingProjectId: projectId, branch, environment: 'preview' })
+              await createAndDeploy({ existingProjectId: projectId, branch, environment: 'preview' })
               toast({ title: 'Preview started', description: `${project?.name} preview for ${branch} is building.` })
               setOpen(false)
             })}
@@ -854,7 +994,7 @@ export function NewServerDialog() {
           <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
           <Button
             disabled={!ip || !name || submitting}
-            onClick={() => run(() => {
+            onClick={() => void run(async () => {
               // ponytail: record ONLY what the operator actually told us. This
               // used to invent a hostname (`<name>.slipway.run`), an OS
               // ("Ubuntu 24.04 LTS"), 4 cores, 16 GB RAM, a 200 GB disk and a
@@ -862,11 +1002,12 @@ export function NewServerDialog() {
               // all of which the Servers list then displayed as fact. The real
               // OS and Docker version are discovered by the SSH join probe;
               // until that runs the row stays honestly blank.
-              addServer({ name, hostname: ip, ip, role, sshUser: user, sshKeyId: sshKey })
+              await addServer({ name, hostname: ip, ip, role, sshUser: user, sshKeyId: sshKey })
               toast({
                 title: 'Server added',
                 description: `${name} is recorded as ${role} but not connected yet — use Join to reach it over SSH.`,
               })
+              setOpen(false)
             })}
             className="gap-2"
           >
@@ -936,8 +1077,8 @@ export function NewSshKeyDialog() {
           <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
           <Button
             disabled={!name || !publicKey || submitting}
-            onClick={() => run(() => {
-              void api.post('/api/ssh-keys', { name, publicKey, scope })
+            onClick={() => void run(async () => {
+              await api.post('/api/ssh-keys', { name, publicKey, scope })
               setOpen(false)
               toast({ title: 'SSH key added', description: `${name} can now be used for ${scope} access.` })
             })}
@@ -1011,8 +1152,8 @@ export function NewRegistryDialog() {
           <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
           <Button
             disabled={!name || !url || submitting}
-            onClick={() => run(() => {
-              void api.post('/api/registries', { name, url, auth, token: auth === 'token' ? token : undefined, password: auth === 'basic' ? token : undefined })
+            onClick={() => void run(async () => {
+              await api.post('/api/registries', { name, url, auth, token: auth === 'token' ? token : undefined, password: auth === 'basic' ? token : undefined })
               setOpen(false)
               toast({ title: 'Registry added', description: `${name} connected.` })
             })}
@@ -1088,8 +1229,8 @@ export function NewWebhookDialog() {
           <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
           <Button
             disabled={!url || events.length === 0 || submitting}
-            onClick={() => run(() => {
-              void api.post('/api/webhooks', { url, events })
+            onClick={() => void run(async () => {
+              await api.post('/api/webhooks', { url, events })
               setOpen(false)
               toast({ title: 'Webhook added', description: `Subscribed to ${events.length} event${events.length === 1 ? '' : 's'}.` })
             })}
@@ -1176,7 +1317,7 @@ export function NewTokenDialog() {
           {!generated && (
             <Button
               disabled={!name || submitting}
-              onClick={() => run(async () => {
+              onClick={() => void run(async () => {
                 const res = await api.post<{ token: string }>('/api/tokens', { name, scope })
                 setGenerated(res.token)
               })}
@@ -1246,8 +1387,8 @@ export function AddServiceDialog({ projectId }: { projectId: string }) {
           <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
           <Button
             disabled={!name || !image || submitting}
-            onClick={() => run(() => {
-              void addService(projectId, { name, kind, image, replicas: 1, memoryMb: 256, cpuMilli: 200 })
+            onClick={() => void run(async () => {
+              await addService(projectId, { name, kind, image, replicas: 1, memoryMb: 256, cpuMilli: 200 })
               setOpen(false)
               toast({ title: 'Service added', description: `${name} is now scheduled.` })
             })}

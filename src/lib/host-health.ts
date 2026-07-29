@@ -418,10 +418,25 @@ export function diagnoseDeployError(text: string): DeployCause | null {
       cause: "The Docker daemon was restarting or starved mid-op.",
       action: "Retry; if it persists, check agent/engine health in the Routing panel.",
     }
-  if (/\b401\b|\b403\b|Authentication failed|could not read Username/i.test(t))
+  if (/\b401\b|\b403\b|Authentication failed|could not read Username|Repository not found/i.test(t))
     return {
-      cause: "Clone failed — the repo is private or the token is stale/mismatched.",
-      action: "Confirm the repo is public as marked, or add a valid access token.",
+      cause: "Clone failed — the repo is private, missing, or the token is stale/mismatched.",
+      action: "Confirm the repo exists and is public, or add a valid access token for private repos.",
+    }
+  if (/Could not find remote branch|Remote branch .* not found/i.test(t))
+    return {
+      cause: "The requested git branch does not exist on the remote.",
+      action: "Check the branch name in the deploy dialog (often `main` or `master`) and retry.",
+    }
+  if (/No Dockerfile|does not have a Dockerfile|failed to read dockerfile/i.test(t))
+    return {
+      cause: "The repository has no Dockerfile and Slipway could not generate one for its stack.",
+      action: "Add a Dockerfile at the repo root, or use a Node/Next/Python/Go/static project Slipway can auto-build.",
+    }
+  if (/--mount option requires BuildKit|BuildKit is enabled|legacy builder is deprecated/i.test(t))
+    return {
+      cause: "The Dockerfile needs BuildKit (e.g. RUN --mount=…) but the build ran on the legacy builder.",
+      action: "Slipway should build with DOCKER_BUILDKIT=1 / buildx. Rebuild the Slipway image so buildx is installed, then redeploy.",
     }
   if (/no such file or directory.*?\.ya?ml|\.ya?ml.*?no such file|dynamic.*?config/i.test(t))
     return {

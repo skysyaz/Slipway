@@ -313,6 +313,10 @@ model ApiToken {
   name       String
   scope      String   @default("read") // read | deploy | admin
   tokenHash  String   @unique
+  // sha256(token) index for O(1) lookup (no per-miss bcrypt table scan).
+  // NULL for rows minted before the index existed (they still auth via the
+  // bcrypt fallback and are back-filled on first use).
+  lookupHash String?  @unique
   lastUsedAt DateTime?
   createdAt  DateTime @default(now())
   user       User?    @relation(fields: [userId], references: [id])
@@ -323,7 +327,7 @@ model BackupRecord {
   id            String   @id @default(cuid())
   target        String
   targetKind    String   // database | volume | project
-  status        String   @default("running") // completed | running | failed | scheduled
+  status        String   @default("running") // completed | running | failed | scheduled | expired
   sizeMb        Int      @default(0)
   startedAt     DateTime @default(now())
   finishedAt    DateTime?

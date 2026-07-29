@@ -36,17 +36,25 @@ ENV DATABASE_URL=file:/data/slipway.db
 # Next 16 App-Router routing under /api/auth/* (csrf/session/2fa all silently
 # 404 under `bun server.js`, work under `node server.js`). bun is kept only for
 # the prisma db push + TS seed step, which run fine under bun.
-# docker-cli + docker-cli-compose: the deploy pipeline shells out to `docker
-# build` (git/folder context) and `docker compose up` via runCli(). Without the
-# CLI binary in the image those fail with `spawn docker ENOENT` — the runner
-# only has the socket (dockerode), not the client. The CLI talks to the host
-# daemon through the mounted /var/run/docker.sock (USER root), so `docker build
-# <git-url>` and `docker compose -f ... up -d` work for real, no fake success.
-# git: the deploy pipeline clones the project's repository itself before
-# building it (src/lib/docker-ops.ts cloneRepo). Without the binary every git
-# deploy fails at checkout — and the classic `docker build <git-url>` path
-# needs a client-side git too, so there is no way around shipping it.
-RUN apk add --no-cache wget nodejs git docker-cli docker-cli-compose
+# docker-cli + compose + buildx: the deploy pipeline shells out to
+# `docker build` / `docker compose` / `docker buildx`. Without the CLI those
+# fail with `spawn docker ENOENT`. Buildx is required for modern Dockerfiles
+# that use `RUN --mount=…` — the legacy builder rejects them with
+# "the --mount option requires BuildKit", which public Next.js/Node repos ship.
+# git + tar: public-repo deploys shallow-clone then `tar | docker build -`.
+RUN apk add --no-cache wget nodejs docker-cli docker-cli-compose git tar \
+  && (apk add --no-cache docker-cli-buildx \
+      || (mkdir -p /usr/local/lib/docker/cli-plugins \
+          && wget -qO /usr/local/lib/docker/cli-plugins/docker-buildx \
+            "https://github.com/docker/buildx/releases/download/v0.23.0/buildx-v0.23.0.linux-amd64" \
+          && chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx))
+
+# Force BuildKit for every `docker build` / compose build even when the host
+# CLI would otherwise fall back to the legacy builder.
+ENV DOCKER_BUILDKIT=1
+ENV COMPOSE_DOCKER_CLI_BUILD=1
+ENV BUILDX_NO_DEFAULT_ATTESTATIONS=1
+ENV DOCKER_CLI_PLUGIN_PATH=/usr/local/lib/docker/cli-plugins:/usr/libexec/docker/cli-plugins:/usr/lib/docker/cli-plugins
 
 # ponytail: run as root. The container mounts /var/run/docker.sock (root:root)
 # so slipway can orchestrate host containers via dockerode; a non-root user gets

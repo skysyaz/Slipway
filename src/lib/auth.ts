@@ -5,6 +5,7 @@ import GitLabProvider from "next-auth/providers/gitlab"
 import bcrypt from "bcryptjs"
 import { verify as verifyTotp } from "otplib"
 import { db } from "./db"
+import { resolveJwtSecret } from "./security"
 
 /**
  * Clock-skew allowance for TOTP verification, in seconds. One 30s period each
@@ -22,7 +23,24 @@ export const TOTP_TOLERANCE_SECONDS = 30
  */
 export const authOptions: NextAuthOptions = {
   session: { strategy: "jwt", maxAge: 60 * 60 * 24 * 7 }, // 7 days
-  secret: process.env.NEXTAUTH_SECRET || process.env.AUTH_SECRET || "slipway-secret-change-in-production-abc123",
+  // R4: NO hardcoded session secret. A committed literal lets anyone who can
+  // read this repo forge sessions and take over the dashboard (and via it the
+  // host Docker socket). resolveJwtSecret() requires the env in production and
+  // only generates an ephemeral value in dev.
+  //
+  // ponytail: a GETTER, not a call at module scope. Evaluating it eagerly threw
+  // during `next build` — Next imports every route to collect page data, with
+  // NODE_ENV=production and no runtime env, so the build died with
+  //   Failed to collect page data for /api/auth/[...nextauth]
+  //   NEXTAUTH_SECRET is not set — refusing to boot…
+  // That also broke `docker build`: the Dockerfile sets NEXTAUTH_SECRET in the
+  // RUNNER stage, while `bun run build` runs in the BUILDER stage, which has
+  // none. Compiling is not booting. NextAuth reads `.secret` while handling a
+  // request, so the guard still fails closed at runtime — where it belongs —
+  // and a build no longer needs production secrets to exist.
+  get secret() {
+    return resolveJwtSecret()
+  },
   pages: { signIn: "/" }, // custom login view at "/"
   providers: [
     CredentialsProvider({

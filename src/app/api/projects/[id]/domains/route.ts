@@ -2,23 +2,37 @@ import { route } from "@/lib/http"
 import { db } from "@/lib/db"
 import { serializeProject } from "@/lib/serialize"
 import { emit } from "@/lib/notify"
+import { writeDomainRoute, isPrivateIp } from "@/lib/routing"
+import { validIp } from "@/lib/security"
 
 export const dynamic = "force-dynamic"
 
 const INCLUDE = { services: true, domains: true, envVars: true } as const
 
+function isIpAddress(h: string): boolean {
+  // R5: octet-range-checked — never trust ^(\d{1,3}\.){3}\d{1,3}$.
+  return validIp(h)
+}
+
 export const POST = route(async (req, params, auth) => {
   const body = await req.json().catch(() => ({}))
-  const hostname = String(body.hostname || "")
+  const hostname = String(body.hostname || "").trim()
   if (!hostname) return new Response(JSON.stringify({ error: "hostname required" }), { status: 400 })
   const project = await db.project.findUnique({ where: { id: params.id } })
   if (!project) return new Response(JSON.stringify({ error: "Not found" }), { status: 404 })
 
+  const hostnameIsIp = isIpAddress(hostname)
   // Basic hostname sanity — this value ends up in reverse-proxy routing rules,
   // so silently storing "not a hostname" just moves the failure downstream.
-  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i.test(hostname)) {
+  if (!hostnameIsIp && !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i.test(hostname)) {
     return new Response(
       JSON.stringify({ error: `"${hostname}" is not a valid hostname (expected something like app.example.com).` }),
+      { status: 400 }
+    )
+  }
+  if (isPrivateIp(hostname)) {
+    return new Response(
+      JSON.stringify({ error: "Loopback/private IPs can't be routed publicly. Set the server's public IP in Settings." }),
       { status: 400 }
     )
   }
@@ -30,33 +44,75 @@ export const POST = route(async (req, params, auth) => {
   }
 
   const ssl = Boolean(body.ssl)
+  const ipMode = hostnameIsIp
+  // public CAs never issue for bare IPs — refuse ACME in IP mode
+  const tlsMode: "letsencrypt" | "selfsigned" | "http" = ipMode
+    ? ssl
+      ? "selfsigned"
+      : "http"
+    : ssl
+      ? "letsencrypt"
+      : "http"
+
+  // Resolve the app's target port from its running service container.
+  const appService = await db.service.findFirst({ where: { projectId: params.id, kind: "app" } })
+  const targetPort = appService?.port || 3000
+
+  // Persist the record first (the row is the audit trail); then attempt the
+  // real Traefik route and reflect whether it landed in `status`.
+  // Bug B: an IP/self-signed/HTTP domain is NEVER "pending" — there is no ACME
+  // order to wait on, so it is active as soon as the route lands. Only a real
+  // Let's Encrypt order (custom domain) starts pending.
   const domain = await db.domain.create({
     data: {
       projectId: params.id,
       hostname,
       type: String(body.type || "primary"),
-      ssl: ssl ? "managed" : "disabled",
-      // ponytail: NO invented expiry. This used to store `now + 90 days` as the
-      // certificate expiry for a certificate that did not exist and that
-      // Slipway does not issue (Caddy/Traefik does). The Domains view showed
-      // that fiction as a real expiry date, and the scheduler's SSL scan
-      // reported "expiring soon" against it. Stays null until something
-      // actually observes a certificate.
+      // IP mode: mark selfsigned (not "managed"), so no surface reads it as a
+      // pending/ACME cert. http → disabled.
+      ssl: tlsMode === "http" ? "disabled" : tlsMode === "selfsigned" ? "custom" : "managed",
       sslExpiry: null,
-      https: ssl,
-      status: ssl ? "pending" : "active",
+      https: tlsMode !== "http",
+      status: tlsMode === "letsencrypt" ? "pending" : "active",
     },
   })
+
+  let routed = false
+  let routeError = ""
+  try {
+    await writeDomainRoute({
+      projectSlug: project.slug,
+      projectId: project.id,
+      hostname,
+      targetPort,
+      tls: tlsMode,
+    })
+    routed = true
+  } catch (e) {
+    routeError = (e as Error).message
+    console.error("[domains] failed to write Traefik route:", routeError)
+  }
+
+  await db.domain.update({
+    where: { id: domain.id },
+    // selfsigned/http land as active (no cert to wait on); only ACME stays pending.
+    data: { status: routed ? (tlsMode === "letsencrypt" ? "pending" : "active") : "failed" },
+  })
+
   await emit(
     "domain.added",
     "domain",
     `added domain ${hostname} to project`,
     {
       title: "Domain added",
-      body: ssl
-        ? `${hostname} added and marked for SSL. Slipway stores the record — the certificate is issued by your reverse proxy (Caddy/Traefik) once the domain resolves to this host.`
-        : `${hostname} added without SSL. Enable SSL in Domains to secure it.`,
-      level: ssl ? "success" : "info",
+      body: routed
+        ? tlsMode === "letsencrypt"
+          ? `${hostname} routed via Traefik; Let's Encrypt will issue the cert once DNS resolves.`
+          : tlsMode === "selfsigned"
+            ? `${hostname} routed via Traefik with a self-signed cert (browsers will warn).`
+            : `${hostname} routed via Traefik over plain HTTP (not encrypted).`
+        : `${hostname} recorded, but the Traefik route could not be written (${routeError || "routing dir unavailable"}). Reconcile after the proxy dir is mounted.`,
+      level: routed ? "success" : "error",
       kind: "ssl",
     },
     { projectId: params.id, actor: auth.username }
