@@ -26,6 +26,8 @@ import {
   backupExtension,
 } from "../src/lib/backup-format"
 import { redactSecretValue, normalizeCommitSha, REDACTED } from "../src/lib/sanitize-fields"
+import { parseGitSource, isLikelyPublicHost, canonicalGitUrl } from "../src/lib/git-source"
+import { detectStack, type DetectionInput } from "../src/lib/stack-detect"
 
 let n = 0
 const ok = (name: string) => console.log(`  ✓ ${name}`)
@@ -281,6 +283,172 @@ check("normalizeCommitSha: returns empty rather than inventing a commit", () => 
   assert.equal(normalizeCommitSha("zzzzzzz"), "") // not hex
   assert.equal(normalizeCommitSha("main"), "")
   assert.equal(normalizeCommitSha("0".repeat(41)), "") // too long
+})
+
+// ── git-source: every form people actually paste ───────────────────────────
+// Regression: the pipeline took its build context from the request body, which
+// the Deploy button never sends, so it fell through to "." and every git deploy
+// died with `lstat /app/Dockerfile: no such file or directory`.
+check("parseGitSource: the common GitHub forms all resolve to one clone URL", () => {
+  const expected = "https://github.com/owner/repo.git"
+  for (const input of [
+    "https://github.com/owner/repo",
+    "https://github.com/owner/repo.git",
+    "https://github.com/owner/repo/",
+    "http://github.com/owner/repo",
+    "git@github.com:owner/repo.git",
+    "ssh://git@github.com/owner/repo.git",
+    "github.com/owner/repo",
+    "owner/repo",
+    "  https://github.com/owner/repo  ",
+  ]) {
+    const got = parseGitSource(input)
+    assert.ok(got, `should parse: ${input}`)
+    assert.equal(got!.cloneUrl, expected, `wrong clone URL for ${input}`)
+    assert.equal(got!.slug, "owner/repo")
+  }
+})
+
+check("parseGitSource: web deep links carry the branch and subdirectory", () => {
+  const branch = parseGitSource("https://github.com/owner/repo/tree/develop")
+  assert.equal(branch!.ref, "develop")
+  assert.equal(branch!.subdir, undefined)
+
+  const sub = parseGitSource("https://github.com/owner/repo/tree/main/apps/web")
+  assert.equal(sub!.ref, "main")
+  assert.equal(sub!.subdir, "apps/web")
+
+  // Docker's own `#ref` and `#ref:dir` conventions
+  assert.equal(parseGitSource("https://github.com/owner/repo#v2")!.ref, "v2")
+  const both = parseGitSource("https://github.com/owner/repo#main:services/api")
+  assert.equal(both!.ref, "main")
+  assert.equal(both!.subdir, "services/api")
+})
+
+check("parseGitSource: non-GitHub hosts keep their host", () => {
+  assert.equal(parseGitSource("https://gitlab.com/g/p")!.cloneUrl, "https://gitlab.com/g/p.git")
+  assert.equal(parseGitSource("git@bitbucket.org:t/r.git")!.host, "bitbucket.org")
+  assert.equal(isLikelyPublicHost("github.com"), true)
+  assert.equal(isLikelyPublicHost("git.internal.corp"), false)
+})
+
+check("parseGitSource: rejects what isn't a repository", () => {
+  for (const bad of ["", "   ", "not a url", "https://github.com/owner", "ftp:"]) {
+    assert.equal(parseGitSource(bad), null, `should reject: ${JSON.stringify(bad)}`)
+  }
+})
+
+// ── stack-detect: a repo without a Dockerfile is still deployable ──────────
+check("detectStack: a repo's own Dockerfile always wins and is never overwritten", () => {
+  const d = detectStack({ files: ["Dockerfile", "package.json", "src"], packageJson: { scripts: { start: "node ." } } })
+  assert.equal(d!.stack, "dockerfile")
+  assert.equal(d!.dockerfile, null, "must not generate a Dockerfile over the repo's own")
+})
+
+check("detectStack: Next.js recognised by dependency or config file", () => {
+  const byDep = detectStack({ files: ["package.json"], packageJson: { dependencies: { next: "15" } } })
+  assert.equal(byDep!.stack, "nextjs")
+  assert.equal(byDep!.port, 3000)
+  assert.match(byDep!.dockerfile!, /EXPOSE 3000/)
+
+  const byConfig = detectStack({ files: ["package.json", "next.config.ts"], packageJson: {} })
+  assert.equal(byConfig!.stack, "nextjs")
+})
+
+check("detectStack: plain Node app uses its own start script", () => {
+  const d = detectStack({ files: ["package.json"], packageJson: { scripts: { start: "node server.js" } } })
+  assert.equal(d!.stack, "node")
+  assert.match(d!.dockerfile!, /CMD \["npm", "run", "start"\]/)
+
+  // falls back to serve, then dev, when there is no start
+  const serve = detectStack({ files: ["package.json"], packageJson: { scripts: { serve: "x" } } })
+  assert.match(serve!.dockerfile!, /"serve"/)
+  const dev = detectStack({ files: ["package.json"], packageJson: { scripts: { dev: "x" } } })
+  assert.match(dev!.dockerfile!, /"dev"/)
+})
+
+check("detectStack: package manager follows the committed lockfile", () => {
+  const bun = detectStack({ files: ["package.json", "bun.lockb"], packageJson: { scripts: { start: "x" } } })
+  assert.equal(bun!.stack, "bun")
+  assert.match(bun!.dockerfile!, /oven\/bun/)
+
+  const pnpm = detectStack({ files: ["package.json", "pnpm-lock.yaml"], packageJson: { scripts: { start: "x" } } })
+  assert.match(pnpm!.dockerfile!, /pnpm install --frozen-lockfile/)
+
+  const yarn = detectStack({ files: ["package.json", "yarn.lock"], packageJson: { scripts: { start: "x" } } })
+  assert.match(yarn!.dockerfile!, /yarn install --frozen-lockfile/)
+
+  // npm ci needs a lockfile; without one it must not be used
+  const noLock = detectStack({ files: ["package.json"], packageJson: { scripts: { start: "x" } } })
+  assert.match(noLock!.dockerfile!, /npm install/)
+  assert.ok(!/npm ci/.test(noLock!.dockerfile!))
+  const withLock = detectStack({ files: ["package.json", "package-lock.json"], packageJson: { scripts: { start: "x" } } })
+  assert.match(withLock!.dockerfile!, /npm ci/)
+})
+
+check("detectStack: build-but-no-start is served as a static bundle", () => {
+  const d = detectStack({ files: ["package.json"], packageJson: { scripts: { build: "vite build" } } })
+  assert.equal(d!.stack, "static")
+  assert.match(d!.dockerfile!, /nginx/)
+})
+
+check("detectStack: non-Node ecosystems by marker file", () => {
+  const cases: Array<[string[], string, number]> = [
+    [["requirements.txt", "main.py"], "python", 8000],
+    [["pyproject.toml"], "python", 8000],
+    [["go.mod", "main.go"], "go", 8080],
+    [["Cargo.toml", "src"], "rust", 8080],
+    [["Gemfile"], "ruby", 3000],
+    [["composer.json"], "php", 80],
+    [["index.html", "style.css"], "static", 80],
+  ]
+  for (const [files, stack, port] of cases) {
+    const d = detectStack({ files })
+    assert.ok(d, `should detect ${stack} from ${files.join(",")}`)
+    assert.equal(d!.stack, stack)
+    assert.equal(d!.port, port)
+    assert.match(d!.dockerfile!, new RegExp(`EXPOSE ${port}`), `${stack} must EXPOSE ${port}`)
+  }
+})
+
+check("detectStack: every generated Dockerfile exposes a port so it can be published", () => {
+  const inputs: DetectionInput[] = [
+    { files: ["package.json"], packageJson: { dependencies: { next: "15" } } },
+    { files: ["package.json"], packageJson: { scripts: { start: "x" } } },
+    { files: ["requirements.txt"] },
+    { files: ["go.mod"] },
+    { files: ["Gemfile"] },
+    { files: ["index.html"] },
+  ]
+  for (const i of inputs) {
+    const d = detectStack(i)
+    assert.ok(d?.dockerfile, "expected a generated Dockerfile")
+    assert.match(d!.dockerfile!, /^EXPOSE \d+$/m, `no EXPOSE in ${d!.stack} Dockerfile`)
+  }
+})
+
+check("detectStack: unrecognised repo returns null rather than guessing", () => {
+  assert.equal(detectStack({ files: ["README.md", "LICENSE"] }), null)
+  assert.equal(detectStack({ files: [] }), null)
+})
+
+check("canonicalGitUrl: round-trips the ref and subdirectory a deep link carried", () => {
+  // plain repo -> plain clone URL
+  const plain = parseGitSource("https://github.com/owner/repo")!
+  assert.equal(canonicalGitUrl(plain), "https://github.com/owner/repo.git")
+
+  // a /tree/ deep link must not silently lose the branch or the subdirectory:
+  // storing only the clone URL would build the default branch at the repo root
+  const deep = parseGitSource("https://github.com/owner/repo/tree/dev/apps/api")!
+  const canonical = canonicalGitUrl(deep)
+  const reparsed = parseGitSource(canonical)!
+  assert.equal(reparsed.cloneUrl, deep.cloneUrl)
+  assert.equal(reparsed.ref, "dev")
+  assert.equal(reparsed.subdir, "apps/api")
+
+  // branch only
+  const branchOnly = parseGitSource("https://github.com/owner/repo/tree/release")!
+  assert.equal(parseGitSource(canonicalGitUrl(branchOnly))!.ref, "release")
 })
 
 console.log(`\n  ${n} checks passed ✓`)

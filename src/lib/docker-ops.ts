@@ -22,8 +22,14 @@ import type Docker from "dockerode"
 import { randomBytes } from "node:crypto"
 import { db } from "./db"
 import { emit, recordActivity } from "./notify"
-import { diagnoseDeployError, demuxToString } from "./host-health"
+import { diagnoseDeployError, demuxToString, sanitize } from "./host-health"
 import { normalizeCommitSha } from "./sanitize-fields"
+import {
+  cloneRepo,
+  detectContext,
+  cleanupWorkspace,
+  type ContextDetection,
+} from "./build-context"
 import {
   backupSlug,
   parseSizeMarker,
@@ -278,6 +284,54 @@ async function containerConfigFor(projectId: string): Promise<{
   }
 }
 
+/**
+ * Append human-readable output to a pipeline step's log so the deploy view can
+ * show what actually happened at each stage, not just on failure.
+ */
+async function appendStepLog(deploymentId: string, order: number, text: string): Promise<void> {
+  const clean = sanitize(String(text ?? "")).trim()
+  if (!clean) return
+  await db.deploymentStep
+    .updateMany({ where: { deploymentId, order }, data: { log: clean.slice(-1200) } })
+    .catch(() => {})
+}
+
+/**
+ * The port an image declares it listens on, from its EXPOSE metadata.
+ *
+ * When several are exposed, prefer a well-known HTTP port so an image that
+ * exposes both 3000 and 9229 (a debugger) publishes the one people want.
+ * Returns null when the image exposes nothing — the caller then says so
+ * instead of inventing a binding.
+ */
+async function imageExposedPort(
+  docker: Docker,
+  image: string
+): Promise<{ port: number; proto: string } | null> {
+  try {
+    const info = (await docker.getImage(image).inspect()) as {
+      Config?: { ExposedPorts?: Record<string, unknown> }
+    }
+    const keys = Object.keys(info.Config?.ExposedPorts || {})
+    if (!keys.length) return null
+    const parsed = keys
+      .map((k) => {
+        const [p, proto] = k.split("/")
+        return { port: Number(p), proto: proto || "tcp" }
+      })
+      .filter((x) => Number.isFinite(x.port) && x.port > 0)
+    if (!parsed.length) return null
+    const preferred = [80, 3000, 8080, 8000, 5000, 4000, 443]
+    for (const want of preferred) {
+      const hit = parsed.find((x) => x.port === want && x.proto === "tcp")
+      if (hit) return hit
+    }
+    return parsed.find((x) => x.proto === "tcp") ?? parsed[0]
+  } catch {
+    return null
+  }
+}
+
 async function setStep(deploymentId: string, order: number, status: string) {
   await db.deploymentStep.updateMany({
     where: { deploymentId, order },
@@ -299,10 +353,27 @@ export async function realDeploy(
   const project = await db.project.findUnique({ where: { id: projectId } })
   if (!project) throw new Error("Project not found")
 
+  // ponytail: resolve the source from the PROJECT first, request body second.
+  // The dashboard's Deploy button posts only `{projectId}`, so anything read
+  // solely from `opts` was undefined on every redeploy — which is how the build
+  // context ended up as "." (the Slipway container's own /app) and every git
+  // deploy failed with "lstat /app/Dockerfile: no such file or directory".
   const source = opts.source || project.source
-  const isImageSource = source === "image" || (source === "git" && !project.repoUrl && !!project.dockerImage)
-  const image = project.dockerImage || opts.repoUrl || ""
-  if (isImageSource && !image) throw new Error("No image to deploy")
+  const gitUrl = (opts.repoUrl || project.repoUrl || "").trim()
+  const folderPath = (opts.folderPath || project.folderPath || "").trim()
+  const composePath = (opts.composePath || project.composePath || "").trim()
+  const isImageSource = source === "image" || (!gitUrl && !folderPath && !!project.dockerImage)
+  const image = project.dockerImage || ""
+  if (isImageSource && !image) {
+    throw new Error(
+      "This project has no source to deploy: no Docker image, no Git repository and no folder path. Edit the project and set one."
+    )
+  }
+  if (!isImageSource && source !== "compose" && !gitUrl && !folderPath) {
+    throw new Error(
+      "This project has no Git repository or folder path to build from. Edit the project and set a repository URL such as https://github.com/owner/repo."
+    )
+  }
 
   // Always record the deploy attempt — a failed deploy still shows in the list.
   const steps = STAGES.map((stage, i) => ({
@@ -320,7 +391,11 @@ export async function realDeploy(
       projectId,
       commitSha: normalizeCommitSha((opts as { commitSha?: string }).commitSha),
       commitMessage: opts.commitMessage || "Manual deploy from dashboard",
-      branch: opts.branch || "main",
+      // ponytail: the deployment RECORD defaults to "main" only as a label.
+      // The clone itself passes no --branch when none was asked for, so the
+      // provider's real default is used — hardcoding "main" broke every repo
+      // still on "master" (traefik/whoami, for one).
+      branch: opts.branch?.trim() || "default",
       author: actor,
       environment: opts.environment || project.environment,
       status: "building",
@@ -335,6 +410,10 @@ export async function realDeploy(
     isImageSource,
     image,
     source,
+    gitUrl,
+    folderPath,
+    composePath,
+    branch: opts.branch || undefined,
     opts,
     actor,
   }).catch((e) => console.error("[docker-ops] deploy pipeline failed:", e))
@@ -351,6 +430,12 @@ async function runPipeline(
     isImageSource: boolean
     image: string
     source?: string
+    /** Repo to clone, already resolved from the project row. */
+    gitUrl?: string
+    /** Host path to build from, already resolved from the project row. */
+    folderPath?: string
+    composePath?: string
+    branch?: string
     opts: DeployOptions
     actor: string
   }
@@ -374,8 +459,26 @@ async function runPipeline(
     })
   }
   const pipelineStart = Date.now()
+  // declared out here so the finally block can clean it up whatever happens
+  let workspace: string | null = null
 
   try {
+    // ponytail: check the engine BEFORE any step runs, and attribute the
+    // failure to the first step. Acquiring the client here used to throw out of
+    // the whole pipeline, so a deploy against a stopped Docker left every stage
+    // sitting at "queued" with no indication of where it stopped — the
+    // deployment just said "Docker engine unavailable" with a blank timeline.
+    const { isDockerAvailable } = await import("./docker")
+    if (!(await isDockerAvailable())) {
+      const msg = "Docker engine unavailable — start Docker on the host and redeploy."
+      await db.deploymentStep
+        .updateMany({
+          where: { deploymentId, order: 1 },
+          data: { status: "failed", finishedAt: new Date(), log: msg },
+        })
+        .catch(() => {})
+      throw new Error(msg)
+    }
     const docker = await getDocker()
     let failingOrder = 0 // ponytail: track which step threw so its log tail is persisted (Bug 3)
     const failStep = async (order: number, log: string) => {
@@ -385,34 +488,129 @@ async function runPipeline(
         data: { status: "failed", finishedAt: new Date(), log: log.slice(-1200) || null },
       })
     }
-    // checkout / detect / install — cheap for image source
-    await begin(1); await sleep(300); await finish(1)
-    await begin(2); await sleep(300); await finish(2)
-    if (!ctx.isImageSource) {
-      await begin(3); await sleep(400); await finish(3)
+    // ── checkout ────────────────────────────────────────────────────────
+    // ponytail: these three stages used to be `await sleep(300)` each, and the
+    // build then ran `docker build <ctxPath>` where ctxPath came from the
+    // REQUEST BODY (`opts.repoUrl`). The dashboard's Deploy button posts only
+    // `{projectId}`, so ctxPath fell through to "." — the Slipway container's
+    // own working directory — and every git deploy died with
+    //   unable to evaluate symlinks in Dockerfile path: lstat /app/Dockerfile
+    // The repo URL lives on the PROJECT; read it from there, clone it for real,
+    // and make checkout/detect/build mean what their labels say.
+    let buildContext = ""
+    let detection: ContextDetection | null = null
+
+    await begin(1)
+    if (ctx.isImageSource) {
+      await finish(1)
+    } else if (ctx.source === "compose") {
+      await finish(1)
+    } else if (ctx.gitUrl) {
+      try {
+        const checkout = await cloneRepo(ctx.gitUrl, ctx.branch, deploymentId)
+        workspace = checkout.workspace
+        buildContext = checkout.contextPath
+        // Stamp the deployment with what was really checked out: a real commit
+        // SHA (replacing the random hex string deployments used to carry) and
+        // the branch actually resolved.
+        if (checkout.commitSha || checkout.branch) {
+          await db.deployment.update({
+            where: { id: deploymentId },
+            data: {
+              ...(checkout.commitSha ? { commitSha: checkout.commitSha.slice(0, 7) } : {}),
+              ...(checkout.commitMessage ? { commitMessage: checkout.commitMessage } : {}),
+              ...(checkout.branch && checkout.branch !== "HEAD" ? { branch: checkout.branch } : {}),
+            },
+          })
+        }
+        await appendStepLog(deploymentId, 1, checkout.log)
+        await finish(1)
+      } catch (ce) {
+        await failStep(1, (ce as Error).message)
+        throw ce
+      }
+    } else if (ctx.folderPath) {
+      // folder source: build straight from a path on the host
+      buildContext = ctx.folderPath
+      await appendStepLog(deploymentId, 1, `Using local folder ${ctx.folderPath} as the build context.`)
+      await finish(1)
+    } else {
+      const msg =
+        "This project has no source to build: no image, no git repository and no folder path. Edit the project and set a Git repository URL (e.g. https://github.com/owner/repo) or a Docker image."
+      await failStep(1, msg)
+      throw new Error(msg)
     }
 
+    // ── detect stack ────────────────────────────────────────────────────
+    await begin(2)
+    if (!ctx.isImageSource && ctx.source !== "compose" && buildContext) {
+      try {
+        detection = await detectContext(buildContext)
+        await appendStepLog(deploymentId, 2, `${detection.label} — ${detection.reason}`)
+        // Record what we found so the project card stops saying "Docker image".
+        await db.project
+          .update({
+            where: { id: projectId },
+            data: { stack: detection.stack, stackLabel: detection.label },
+          })
+          .catch(() => {})
+        await finish(2)
+      } catch (de) {
+        await failStep(2, (de as Error).message)
+        throw de
+      }
+    } else {
+      await finish(2)
+    }
+
+    // ── install deps ────────────────────────────────────────────────────
+    // Dependency installation happens inside the image build (that is what a
+    // Dockerfile is for), so this stage reports the plan rather than pretending
+    // to do separate work.
+    await begin(3)
+    if (detection) {
+      await appendStepLog(
+        deploymentId,
+        3,
+        detection.dockerfile
+          ? "Dependencies are installed by the generated Dockerfile during the image build."
+          : "Dependencies are installed by the repository's own Dockerfile during the image build."
+      )
+    }
+    await finish(3)
+
     let image = ctx.image
+
+    // ── build (4) + image (6) ───────────────────────────────────────────
+    // ponytail: the build used to run on step 5, which is the TEST stage — so
+    // build output was filed under "Tests" while "Build" sat at queued forever.
+    // Build is 4, test is 5, image is 6; see STAGES.
     if (ctx.isImageSource) {
-      // image: pull (build step skipped)
-      await begin(5)
-      await pullImage(docker, image)
-      await finish(5)
-      await begin(6); await sleep(200); await finish(6) // image built = pulled
+      await begin(4); await finish(4)          // nothing to build for an image
+      await begin(5); await finish(5)          // no tests
+      await begin(6)
+      try {
+        await pullImage(docker, image)
+        await appendStepLog(deploymentId, 6, `Pulled ${image}.`)
+        await finish(6)
+      } catch (pe) {
+        await failStep(6, (pe as Error).message)
+        throw pe
+      }
     } else if (ctx.source === "compose") {
-      // compose: build via CLI
-      await begin(5)
-      await runCli([
-        "compose",
-        "-f",
-        String(ctx.opts.composePath || "/dev/null"),
-        "build",
-      ])
-      await finish(5)
+      await begin(4)
+      try {
+        const out = await runCli(["compose", "-f", String(ctx.composePath || ctx.opts.composePath || "/dev/null"), "build"])
+        await appendStepLog(deploymentId, 4, out.stdout || out.stderr)
+        await finish(4)
+      } catch (be) {
+        await failStep(4, ((be as Error & { stderr?: string }).stderr || (be as Error).message || "").trim())
+        throw be
+      }
+      await begin(5); await finish(5)
+      await begin(6); await finish(6)
       image = "" // compose manages its own images
     } else {
-      // git/folder: docker build
-      await begin(5)
       // ponytail: tag the build with the DEPLOYMENT ID as well as :latest.
       // :latest alone is overwritten by every subsequent build, so the image a
       // past deployment released stopped existing the moment the next one ran —
@@ -420,17 +618,33 @@ async function runPipeline(
       // per-deployment tag is what makes realRollback() able to do real work.
       const versionTag = `slipway-${projectSlug}:${deploymentId.slice(-8)}`
       const latestTag = `slipway-${projectSlug}:latest`
-      const ctxPath = String(ctx.opts.folderPath || ctx.opts.repoUrl || ".")
+
+      await begin(4)
       try {
-        await runCli(["build", "-t", versionTag, "-t", latestTag, ctxPath])
+        const args = ["build", "-t", versionTag, "-t", latestTag]
+        // A generated Dockerfile is written next to the context as
+        // `Dockerfile.slipway` so we never clobber anything the repo ships.
+        if (detection?.generatedDockerfileName) args.push("-f", `${buildContext}/${detection.generatedDockerfileName}`)
+        args.push(buildContext)
+        const out = await runCli(args)
+        await appendStepLog(deploymentId, 4, out.stdout || out.stderr)
         image = versionTag
-        await finish(5)
+        await finish(4)
       } catch (be) {
-        // ponytail: persist the real build stderr (ENOSPC etc.) on the step + rethrow
         const tail = ((be as Error & { stderr?: string }).stderr || (be as Error).message || "").trim()
-        await failStep(5, tail)
+        await failStep(4, tail)
         throw be
       }
+
+      // tests: the pipeline runs none, and says so rather than showing a green
+      // tick for work that never happened.
+      await begin(5)
+      await appendStepLog(deploymentId, 5, "No test command is configured — Slipway does not run tests during a deploy.")
+      await finish(5)
+
+      await begin(6)
+      await appendStepLog(deploymentId, 6, `Tagged ${versionTag} and ${latestTag}.`)
+      await finish(6)
     }
 
     // push step: no-op for local registry
@@ -441,7 +655,7 @@ async function runPipeline(
     let containerId: string | null = null
     if (ctx.source === "compose") {
       try {
-        await runCli(["compose", "-f", String(ctx.opts.composePath || "/dev/null"), "up", "-d"])
+        await runCli(["compose", "-f", String(ctx.composePath || ctx.opts.composePath || "/dev/null"), "up", "-d"])
       } catch (ce) {
         await failStep(8, ((ce as Error & { stderr?: string }).stderr || (ce as Error).message || "").trim())
         throw ce
@@ -464,6 +678,20 @@ async function runPipeline(
         // did read them. Deploy and reconcile now build the container the same
         // way; realReconcile() is the in-place variant of this block.
         const cfg = await containerConfigFor(projectId)
+
+        // ponytail: PUBLISH the app's port. This passed `PortBindings: {}`, so
+        // a build could succeed, the container could start, the deploy could go
+        // green — and the app was reachable from nowhere. The image itself
+        // declares what it listens on (EXPOSE), so ask it rather than guessing,
+        // then bind that to a free host port and record the real URL.
+        const exposed = await imageExposedPort(docker, image)
+        const portBindings: Record<string, { HostPort: string }[]> = {}
+        let publishedPort = 0
+        if (exposed) {
+          publishedPort = await pickFreePort(docker, exposed.port)
+          portBindings[`${exposed.port}/${exposed.proto}`] = [{ HostPort: String(publishedPort) }]
+        }
+
         const created = await docker.createContainer({
           Image: image,
           name,
@@ -471,13 +699,31 @@ async function runPipeline(
           ...(cfg.Cmd ? { Cmd: cfg.Cmd } : {}),
           HostConfig: {
             RestartPolicy: { Name: "unless-stopped" },
-            PortBindings: {},
+            PortBindings: portBindings,
             ...(cfg.Memory ? { Memory: cfg.Memory } : {}),
             ...(cfg.NanoCpus ? { NanoCpus: cfg.NanoCpus } : {}),
           },
         })
         await created.start()
         containerId = created.id
+
+        if (publishedPort) {
+          const publicHost = process.env.SLIPWAY_PUBLIC_HOST?.trim() || "localhost"
+          await db.project
+            .update({ where: { id: projectId }, data: { url: `http://${publicHost}:${publishedPort}` } })
+            .catch(() => {})
+          await appendStepLog(
+            deploymentId,
+            8,
+            `Container listening on ${exposed!.port}/${exposed!.proto}, published to host port ${publishedPort}.`
+          )
+        } else {
+          await appendStepLog(
+            deploymentId,
+            8,
+            "The image declares no EXPOSE port, so nothing was published to the host. Add an EXPOSE line to the Dockerfile if the app should be reachable."
+          )
+        }
       } catch (re) {
         // ponytail: create/start fails with ENOSPC when the docker FS is full —
         // persist the real error tail on the release step (Bug 3).
@@ -565,6 +811,12 @@ async function runPipeline(
       { projectId, actor: ctx.actor }
     )
     throw e
+  } finally {
+    // ponytail: always remove the clone. A shallow clone of a busy repo is tens
+    // of megabytes, one per deploy, on the same filesystem the Docker daemon
+    // uses — leaving them behind is a slow march to the ENOSPC that host-health
+    // exists to diagnose. Runs on success and failure alike.
+    await cleanupWorkspace(workspace)
   }
 }
 

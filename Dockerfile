@@ -42,7 +42,11 @@ ENV DATABASE_URL=file:/data/slipway.db
 # only has the socket (dockerode), not the client. The CLI talks to the host
 # daemon through the mounted /var/run/docker.sock (USER root), so `docker build
 # <git-url>` and `docker compose -f ... up -d` work for real, no fake success.
-RUN apk add --no-cache wget nodejs docker-cli docker-cli-compose
+# git: the deploy pipeline clones the project's repository itself before
+# building it (src/lib/docker-ops.ts cloneRepo). Without the binary every git
+# deploy fails at checkout — and the classic `docker build <git-url>` path
+# needs a client-side git too, so there is no way around shipping it.
+RUN apk add --no-cache wget nodejs git docker-cli docker-cli-compose
 
 # ponytail: run as root. The container mounts /var/run/docker.sock (root:root)
 # so slipway can orchestrate host containers via dockerode; a non-root user gets

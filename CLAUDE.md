@@ -64,7 +64,7 @@ Docker Desktop / `dockerd` must be running for anything meaningful to work.
 ### Testing reality
 
 There is **no test framework**. `bun run test` runs a single hand-rolled
-self-check (`scripts/selfcheck-host-health.ts`, 31 checks) using `node:assert`:
+self-check (`scripts/selfcheck-host-health.ts`, 44 checks) using `node:assert`:
 
 - **`src/lib/host-health.ts`** — `diagnoseDeployError`, `parseTraefikLogs`,
   `demuxStream` (dockerode's multiplexed stream framing), `sanitize`. Its
@@ -78,8 +78,13 @@ self-check (`scripts/selfcheck-host-health.ts`, 31 checks) using `node:assert`:
 - **`src/lib/sanitize-fields.ts`** — `redactSecretValue` (Settings holds SSH
   passwords, and the config export used to dump them) and `normalizeCommitSha`
   (deployments were stamped with a random hex string shown as the git commit).
+- **`src/lib/git-source.ts`** — every URL form people paste (address bar, clone
+  box, SSH remote, `owner/repo`, `/tree/branch/subdir`) collapsed to one clone
+  URL, and `canonicalGitUrl` round-tripping the ref/subdir.
+- **`src/lib/stack-detect.ts`** — which stack a checked-out repo is and the
+  Dockerfile generated for it when it ships none.
 
-Those four modules are deliberately **pure and import-free** so the self-check
+Those six modules are deliberately **pure and import-free** so the self-check
 runs without a Docker socket, a database, or a generated Prisma client. Keep new
 testable logic out of the modules that import `./db`.
 
@@ -109,6 +114,9 @@ src/
     authz.ts              PURE role/action policy (roleAllows, defaultActionFor)
     backup-format.ts      PURE backup naming, shell quoting, per-engine dump commands
     sanitize-fields.ts    PURE secret redaction + commit-SHA validation
+    git-source.ts         PURE git URL parsing (all the forms people paste)
+    stack-detect.ts       PURE stack detection + Dockerfile generation
+    build-context.ts      clone + detect + write Dockerfile (no docker/db imports)
     host-health.ts        disk/inode/ENOSPC/Traefik diagnosis + log demux + sanitize
     metrics.ts            in-memory ring buffer sampled from `docker stats`
     db.ts                 Prisma singleton + SQLite path resolution
@@ -198,7 +206,25 @@ progression. Failures persist the last ~1200 chars of the step log so the UI can
 show a real cause. Build for git/folder/compose sources shells out to the
 `docker` CLI via `runCli()`; image sources go through dockerode.
 
-Two invariants to preserve:
+**Checkout is real.** `build-context.ts` shallow-clones the project's repo into
+`<SLIPWAY_DATA_DIR>/builds/<deploymentId>`, records the true commit SHA and
+branch, detects the stack, and — when the repo ships no Dockerfile — writes a
+generated `Dockerfile.slipway` passed with `-f` (never overwriting anything the
+repo ships). The workspace is removed in a `finally`. Requires `git` in the
+image; the Dockerfile installs it.
+
+**The source comes from the PROJECT row**, with the request body only as an
+override. The dashboard's Deploy button posts `{projectId}` alone, so anything
+read solely from `opts` is undefined on every redeploy — that is how the build
+context used to fall through to `"."` (Slipway's own `/app`) and fail with
+`lstat /app/Dockerfile: no such file or directory`.
+
+**Ports are published from the image's own EXPOSE.** After the build, the image
+is inspected, the exposed port bound to a free host port, and `project.url`
+recorded. `PortBindings: {}` meant a green deploy that was reachable from
+nowhere.
+
+Two more invariants to preserve:
 
 - **Container config comes from `containerConfigFor(projectId)`** — env vars
   scoped to the project's environment, `startCmd`, and the memory/CPU limits.

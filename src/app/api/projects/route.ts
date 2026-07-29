@@ -2,6 +2,7 @@ import { route } from "@/lib/http"
 import { db } from "@/lib/db"
 import { serializeProject } from "@/lib/serialize"
 import { recordActivity } from "@/lib/notify"
+import { parseGitSource, canonicalGitUrl } from "@/lib/git-source"
 
 export const dynamic = "force-dynamic"
 
@@ -33,7 +34,10 @@ export const POST = route(async (req) => {
       name,
       slug,
       source: String(body.source || "image"),
-      repoUrl: body.repoUrl ?? null,
+      // canonicalise the repo URL on the way in, so "github.com/o/r",
+      // "git@github.com:o/r.git" and the browser address bar all end up as the
+      // same clone URL and the deploy pipeline never has to guess
+      repoUrl: body.repoUrl ? ((() => { const g = parseGitSource(String(body.repoUrl)); return g ? canonicalGitUrl(g) : String(body.repoUrl) })()) : null,
       folderPath: body.folderPath ?? null,
       composePath: body.composePath ?? null,
       stack: String(body.stack || "dockerfile"),
